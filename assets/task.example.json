@@ -1,0 +1,11 @@
+{
+  "goal": "为 /login 接口补上失败次数限流：同一账号 5 分钟内连续失败 5 次后锁定 10 分钟，并返回 429",
+  "context": "限流中间件放在 src/auth/mw.py；已有 Redis 客户端封装在 src/common/redis.py，直接复用，不要新建连接池。",
+  "inputs": ["src/auth/mw.py", "src/common/redis.py", "tests/test_auth.py"],
+  "owned_paths": ["src/auth/", "tests/test_auth.py"],
+  "acceptance": [
+    "pytest -q tests/test_auth.py",
+    "python -c \"from src.auth.mw import *\""
+  ],
+  "notes": "不要引入新依赖；失败计数用 Redis INCR + EXPIRE，键名 auth:fail:<account>。"
+}
