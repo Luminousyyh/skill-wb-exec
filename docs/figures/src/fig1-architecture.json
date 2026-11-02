@@ -14,7 +14,7 @@
     { "id": "b1", "x": 8.4, "y": 7.0, "w": 5.6, "h": 0.8, "label": "package.json: dsh.bundle", "kind": "shared" },
     { "id": "b2", "x": 8.4, "y": 5.9, "w": 5.6, "h": 0.8, "label": "entry + skill files", "kind": "shared" },
     { "id": "c1", "x": 16.0, "y": 7.0, "w": 5.6, "h": 0.8, "label": "wb_exec.py dispatch", "kind": "control" },
-    { "id": "c2", "x": 16.0, "y": 5.9, "w": 5.6, "h": 0.8, "label": "WorkBuddy CLI (V4.1 Flash)", "kind": "q" },
+    { "id": "c2", "x": 16.0, "y": 5.9, "w": 5.6, "h": 0.8, "label": "CLI executor (pluggable)", "kind": "q" },
     { "id": "d1", "x": 16.0, "y": 2.3, "w": 5.6, "h": 0.9, "label": "worktree wt/ (isolated)", "kind": "state" },
     { "id": "d2", "x": 16.0, "y": 1.1, "w": 5.6, "h": 0.9, "label": "owned_paths whitelist", "kind": "task" },
     { "id": "e1", "x": 8.4, "y": 2.5, "w": 5.6, "h": 0.8, "label": "job.json + heartbeat", "kind": "input" },

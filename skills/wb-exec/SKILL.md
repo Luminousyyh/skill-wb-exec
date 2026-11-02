@@ -1,6 +1,6 @@
 ---
 name: wb-exec
-description: Delegate bounded coding, refactoring and test-writing tasks to a headless WorkBuddy executor (DeepSeek V4.1 Flash) and collect a structured result plus the real diff. Use when the task can be finished independently, the file set is enumerable, and the host agent only wants to plan and review instead of writing code itself.
+description: Delegate bounded coding, refactoring and test-writing tasks to a headless CLI executor (WorkBuddy by default, or codex/claude/aider/custom) and collect a structured result plus the real diff. Use when the task can be finished independently, the file set is enumerable, and the host agent only wants to plan and review instead of writing code itself.
 whenToUse: When implementation-shaped subtasks should be outsourced to another CLI agent; when you want a cheaper executor for volume while you (the host) keep planning and review; when changes need an isolated worktree.
 ---
 
@@ -53,8 +53,11 @@ Common flags:
 - `--dry-run`: print the argv that would run, to confirm paths and flags; starts nothing.
 - `--worktree off`: disable isolation (only when the directory is not a Git repository, or when you explicitly accept in-place changes).
 - `--timeout`: seconds, default 1800.
+- `--executor`: which CLI runs the task. `workbuddy` (default), `codex`, `claude`, `aider`, or `custom`. `WB_EXECUTOR` sets the same default through the environment.
 
-**The executor is fixed**: WorkBuddy / DeepSeek V4.1 Flash at effort `max`. The script hard-codes it and exposes no `--model` or `--effort`; do not try to specify either. When the account or plan refuses that model the run fails — **do not retry with another model**. Report `stderr.log` to the user.
+**The `workbuddy` backend is pinned**: WorkBuddy / DeepSeek V4.1 Flash at effort `max`, hard-coded, with no `--model` or `--effort` flag. When the account or plan refuses that model the run fails — **do not retry with another model**. Report `stderr.log` to the user. The other backends use whatever their own CLI is configured with; `wb-exec` injects no model or effort for them, so do not claim a specific model on those paths.
+
+Do not switch backends to "make it work" after a failure. Pick the backend the user has installed, and only change it when the user asks.
 
 ## 3. Supervise
 

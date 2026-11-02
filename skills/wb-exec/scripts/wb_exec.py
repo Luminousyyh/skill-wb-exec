@@ -58,6 +58,37 @@ class CliNotFound(RuntimeError):
     pass
 
 
+# ---------------------------------------------------------------------------
+# 执行体后端
+# ---------------------------------------------------------------------------
+# 每个后端只描述"怎么把一次任务变成一个 argv 调用"，其余流程（隔离、
+# 心跳、结构化回收、越界检查）完全不区分后端。workbuddy 是默认值，
+# 行为与旧版逐字节一致；其余后端为可选，需要用户自己指向可执行文件。
+
+EXECUTOR_BACKENDS = ("workbuddy", "codex", "claude", "aider", "custom")
+DEFAULT_EXECUTOR = "workbuddy"
+
+
+def _backend_env() -> str:
+    return (os.environ.get("WB_EXECUTOR") or DEFAULT_EXECUTOR).strip().lower()
+
+
+def _custom_argv_template() -> list[str]:
+    """WB_CLI 已经承担自定义入口；这里只读 WB_CLI_ARGV 作为额外参数模板。
+
+    模板中的占位符在组装 argv 时展开：
+      {prompt} {cwd} {schema} {session} {model} {effort}
+    """
+    raw = os.environ.get("WB_CLI_ARGV")
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except Exception:  # noqa: BLE001
+        return []
+    return [str(x) for x in parsed] if isinstance(parsed, list) else []
+
+
 def _utf8_stdout() -> None:
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -127,8 +158,9 @@ def _candidate_entries() -> list[list[str]]:
     return cands
 
 
-def find_cli() -> list[str]:
-    for cand in _candidate_entries():
+def find_cli(backend: str = DEFAULT_EXECUTOR) -> list[str]:
+    candidates = _candidate_entries() if backend == "workbuddy" else _candidate_entries_for(backend)
+    for cand in candidates:
         try:
             probe = subprocess.run(
                 cand + ["--version"],
@@ -141,10 +173,113 @@ def find_cli() -> list[str]:
         text = (probe.stdout or b"").decode("utf-8", "replace")
         if probe.returncode == 0 and any(ch.isdigit() for ch in text):
             return cand
+    if backend == "workbuddy":
+        raise CliNotFound(
+            "找不到可用的 WorkBuddy CLI。请设置 WB_CLI 指向 codebuddy 入口，"
+            "或确认 WorkBuddy 已安装且 CLI 可用。"
+        )
     raise CliNotFound(
-        "找不到可用的 WorkBuddy CLI。请设置 WB_CLI 指向 codebuddy 入口，"
-        "或确认 WorkBuddy 已安装且 CLI 可用。"
+        f"找不到可用的 {backend} CLI。请设置 WB_CLI 指向它的可执行入口，"
+        f"或用 --executor workbuddy 回到默认执行体。"
     )
+
+
+def _candidate_entries_for(backend: str) -> list[list[str]]:
+    """workbuddy 之外的入口探测：只认 WB_CLI，再从 PATH 猜常见名字。
+
+    这些 CLI 的参数形态差异很大，所以只负责"找到可执行文件"，
+    真正的参数拼装交给 build_executor_argv()。
+    """
+    cands: list[list[str]] = []
+    override = os.environ.get("WB_CLI")
+    if override:
+        raw = override.strip()
+        if raw.startswith("["):
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list) and parsed:
+                    cands.append([str(x) for x in parsed])
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            cands.append([raw])
+    for name in {
+        "codex": ("codex",),
+        "claude": ("claude", "claude-code"),
+        "aider": ("aider",),
+        "custom": (),
+    }.get(backend, ()):
+        found = shutil.which(name)
+        if found:
+            cands.append([found])
+    return cands
+
+
+def build_executor_argv(backend: str, cli: list[str], prompt: str, run_cwd: Path,
+                        schema: str, refs: list[str]) -> list[str]:
+    """按后端拼装 argv。
+
+    workbuddy 保持与旧版完全一致的参数序列，其余后端遵循各自 CLI 的
+    常见无头调用约定；custom 完全由 WB_CLI_ARGV 模板决定。
+    """
+    session = str(uuid.uuid4())
+    if backend == "workbuddy":
+        argv = cli + [
+            "-p", prompt,
+            "--output-format", "stream-json",
+            "--json-schema", schema,
+            "-y",
+            "--allowedTools", "Read,Write,Edit,Glob,Grep,Bash",
+            "--add-dir", str(run_cwd),
+            "--session-id", session,
+        ]
+        for ref in refs:
+            argv.extend(["--add-dir", ref])
+        # 执行体固定为 WorkBuddy / DeepSeek V4.1 Flash，推理档位固定 极致(max)。
+        # 不提供其他模型或档位，也不做自动降级。
+        argv.extend(["--model", EXECUTOR_MODEL, "--effort", EXECUTOR_EFFORT])
+        return argv
+
+    if backend == "codex":
+        argv = cli + ["exec", "--json", "--skip-git-repo-check", "-C", str(run_cwd)]
+        for ref in refs:
+            argv.extend(["--add-dir", ref])
+        argv.append(prompt)
+        return argv
+
+    if backend == "claude":
+        argv = cli + [
+            "-p", prompt,
+            "--output-format", "stream-json",
+            "--json-schema", schema,
+            "--permission-mode", "acceptEdits",
+            "--add-dir", str(run_cwd),
+        ]
+        for ref in refs:
+            argv.extend(["--add-dir", ref])
+        return argv
+
+    if backend == "aider":
+        argv = cli + ["--yes-always", "--no-auto-commits", "--message", prompt]
+        for ref in refs:
+            argv.extend(["--read", ref])
+        return argv
+
+    # custom：模板里出现的占位符按本次作业展开。
+    substitutions = {
+        "{prompt}": prompt,
+        "{cwd}": str(run_cwd),
+        "{schema}": schema,
+        "{session}": session,
+        "{model}": EXECUTOR_MODEL,
+        "{effort}": EXECUTOR_EFFORT,
+    }
+    argv = list(cli)
+    for part in _custom_argv_template():
+        for key, value in substitutions.items():
+            part = part.replace(key, value)
+        argv.append(part)
+    return argv
 
 
 def cli_version(argv: list[str]) -> str:
@@ -498,24 +633,11 @@ def _assemble(args) -> tuple[list[str], dict, Path]:
             run_cwd = worktree
 
     prompt = build_prompt(task, run_cwd)
-    cli = find_cli()
+    backend = getattr(args, "executor", None) or _backend_env()
+    cli = find_cli(backend)
     schema = json.dumps(RESULT_SCHEMA, ensure_ascii=False, separators=(",", ":"))
 
-    argv = cli + [
-        "-p", prompt,
-        "--output-format", "stream-json",
-        "--json-schema", schema,
-        "-y",
-        "--allowedTools", "Read,Write,Edit,Glob,Grep,Bash",
-        "--add-dir", str(run_cwd),
-        "--session-id", str(uuid.uuid4()),
-    ]
-    if worktree is not None:
-        for ref in refs:
-            argv.extend(["--add-dir", ref])
-    # 执行体固定为 WorkBuddy / DeepSeek V4.1 Flash，推理档位固定 极致(max)。
-    # 不提供其他模型或档位，也不做自动降级。
-    argv.extend(["--model", EXECUTOR_MODEL, "--effort", EXECUTOR_EFFORT])
+    argv = build_executor_argv(backend, cli, prompt, run_cwd, schema, refs)
 
     env = {}
     if any("app.asar.unpacked" in part for part in cli):
@@ -538,9 +660,12 @@ def _assemble(args) -> tuple[list[str], dict, Path]:
         "worktree": str(worktree) if worktree else None,
         "isolated": worktree is not None,
         "owned_paths": task["owned_paths"],
-        "model": EXECUTOR_MODEL,
-        "effort": EXECUTOR_EFFORT,
-        "model_note": "固定执行体：WorkBuddy / DeepSeek V4.1 Flash，档位 极致(max)",
+        "executor": backend,
+        "model": EXECUTOR_MODEL if backend == "workbuddy" else None,
+        "effort": EXECUTOR_EFFORT if backend == "workbuddy" else None,
+        "model_note": ("固定执行体：WorkBuddy / DeepSeek V4.1 Flash，档位 极致(max)"
+                       if backend == "workbuddy"
+                       else f"后端 {backend}：模型与档位由该 CLI 自己的配置决定"),
         "argv": argv,
         "env": env,
         "timeout": int(args.timeout),
@@ -649,8 +774,10 @@ def cmd_doctor(args) -> int:
                   "state_root": str(STATE_ROOT),
                   "git": shutil.which("git") or None,
                   "subagent_env": bool(os.environ.get("WB_SUBAGENT"))}
+    backend = getattr(args, "executor", None) or _backend_env()
+    info["executor"] = backend
     try:
-        cli = find_cli()
+        cli = find_cli(backend)
         info["cli"] = cli
         info["cli_version"] = cli_version(cli)
         info["cli_source"] = "WB_CLI" if os.environ.get("WB_CLI") else "auto"
@@ -660,13 +787,19 @@ def cmd_doctor(args) -> int:
     cwd = Path(args.cwd or os.getcwd())
     info["cwd"] = str(cwd)
     info["is_git_repo"] = is_git_repo(cwd)
-    info["executor"] = {"model": EXECUTOR_MODEL, "effort": EXECUTOR_EFFORT,
-                        "note": "固定，不可切换"}
-    info["defaults"] = {"worktree": "auto", "timeout_s": DEFAULT_TIMEOUT}
+    info["available_executors"] = list(EXECUTOR_BACKENDS)
+    info["executor_settings"] = (
+        {"model": EXECUTOR_MODEL, "effort": EXECUTOR_EFFORT, "note": "固定，不可切换"}
+        if backend == "workbuddy"
+        else {"note": f"后端 {backend}：参数由该 CLI 决定，不注入 model/effort"}
+    )
+    info["defaults"] = {"worktree": "auto", "timeout_s": DEFAULT_TIMEOUT,
+                        "executor": DEFAULT_EXECUTOR}
     info["notes"] = [
         "isolated=true 时任务在 .wb-exec/jobs/<id>/wt 的独立 worktree 中执行",
-        "执行体固定为 deepseek-v4.1-flash / 极致(max)：不提供其他模型、不做自动降级；账号侧拒绝即失败并报错",
-        "从 WorkBuddy 会话内部再调 codebuddy 会与本次会话共用守护进程，可能阻塞；应在 Kimi Code 等外部终端触发",
+        "默认执行体 workbuddy 固定为 deepseek-v4.1-flash / 极致(max)：不提供其他模型、不做自动降级",
+        "用 --executor 或 WB_EXECUTOR 切换后端；custom 需同时提供 WB_CLI 与 WB_CLI_ARGV 模板",
+        "从 WorkBuddy 会话内部再调 codebuddy 会与本次会话共用守护进程，可能阻塞；应在外部终端触发",
     ]
     print(json.dumps(info, ensure_ascii=False, indent=2))
     return 0 if info["ok"] else 1
@@ -682,6 +815,8 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="秒，默认 1800")
         sp.add_argument("--worktree", choices=["auto", "off"], default="auto",
                         help="auto: Git 仓库自动建独立 worktree")
+        sp.add_argument("--executor", choices=list(EXECUTOR_BACKENDS), default=None,
+                        help=f"执行体后端，默认 {DEFAULT_EXECUTOR}（也可用 WB_EXECUTOR）")
 
     d = sub.add_parser("dispatch", help="后台派发，立即返回 job_id")
     task_opts(d)
@@ -712,6 +847,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     doc = sub.add_parser("doctor", help="自检：CLI、git、环境")
     doc.add_argument("--cwd")
+    doc.add_argument("--executor", choices=list(EXECUTOR_BACKENDS), default=None,
+                     help=f"检查哪个后端，默认 {DEFAULT_EXECUTOR}（也可用 WB_EXECUTOR）")
     doc.set_defaults(func=cmd_doctor)
 
     m = sub.add_parser("_monitor", help=argparse.SUPPRESS)

@@ -95,15 +95,41 @@
 | 1 | Execution failed, or the result could not be parsed (`collect` returns `ok=false`) |
 | 3 | Recursion refused (this process is already an executor) |
 
-## Executor (fixed)
+## Executors (pluggable)
+
+`--executor` (or `WB_EXECUTOR`) selects which CLI runs the task. The rest of the pipeline — worktree isolation, heartbeats, structured capture, the out-of-scope check — is identical for every backend.
+
+| Backend | Entry point | Model and effort |
+|---|---|---|
+| `workbuddy` (default) | probed `codebuddy`, or the CLI inside a local WorkBuddy install; `WB_CLI` overrides | pinned: `deepseek-v4.1-flash`, effort `max`, injected by `wb-exec` |
+| `codex` | `codex` on `PATH`, or `WB_CLI` | whatever that CLI is configured with; `wb-exec` injects nothing |
+| `claude` | `claude` / `claude-code` on `PATH`, or `WB_CLI` | same |
+| `aider` | `aider` on `PATH`, or `WB_CLI` | same |
+| `custom` | `WB_CLI` | same |
+
+A backend name outside that table fails loudly: `find_cli` raises and `doctor` reports `ok=false`. There is no silent fallback to `workbuddy`, because falling back would run the task on a different model than the user selected.
+
+### workbuddy (pinned)
 
 Every dispatch hard-codes `--model deepseek-v4.1-flash --effort max`.
 
-- There is exactly one executor: WorkBuddy / DeepSeek V4.1 Flash at effort `max`. No second model and no effort options.
+- There is exactly one model on this backend at exactly one effort. No second model and no effort options.
 - The model ID comes from resolving the local product configuration (the `resolved ids` in `main.log` contain `deepseek-v4.1-flash`); the display name "DeepSeek V4.1 Flash" cannot be used as an ID.
 - The CLI exposes no `--model` or `--effort`; passing either is rejected by argparse (`unrecognized arguments`), deliberately.
 - When the account or plan refuses that model, the CLI exits non-zero and writes the reason to `stderr.log`. **No downgrade, no model switch** — hand the raw error to the user.
 - This setting applies only to the dispatched executor and never to the host's own session.
+
+### custom template
+
+`WB_CLI_ARGV` is a JSON array of arguments. These placeholders expand per job: `{prompt}`, `{cwd}`, `{schema}`, `{session}`, `{model}`, `{effort}`. Example:
+
+```bash
+WB_CLI=my-agent \
+WB_CLI_ARGV='["run","--prompt","{prompt}","--dir","{cwd}"]' \
+python <SKILL_DIR>/scripts/wb_exec.py dispatch --task t.json --executor custom
+```
+
+A `custom` backend that cannot produce structured output will surface as `ok=false` with a parse blocker; check `artifacts.stdout` before blaming isolation.
 
 ## Sessions and resuming
 

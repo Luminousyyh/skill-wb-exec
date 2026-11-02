@@ -2,9 +2,11 @@
 
 > Delegate bounded implementation work to another CLI agent; keep planning, supervision and review for yourself.
 
-`wb-exec` is a **DeepSeek Harness plugin (skill bundle)**: the host agent hands **coding / refactoring / test-writing** subtasks to a **headless WorkBuddy executor (DeepSeek V4.1 Flash, effort `max`)** and gets back a **structured result** plus the **real diff**.
+`wb-exec` is a **DeepSeek Harness plugin (skill bundle)**: the host agent hands **coding / refactoring / test-writing** subtasks to a **headless CLI executor** and gets back a **structured result** plus the **real diff**.
 
-> ⚠️ **Prerequisite.** The WorkBuddy / CodeBuddy CLI must be installed on the same machine. Without it the plugin installs but the skill cannot do anything: its first step, `doctor`, reports `ok=false` and stops. It never installs dependencies or rewrites configuration on its own.
+The default executor is **WorkBuddy / CodeBuddy (DeepSeek V4.1 Flash, effort `max`)**, pinned on purpose. If you do not have it, switch backends with `--executor` — `codex`, `claude`, `aider`, or `custom` (any CLI, via an argument template). Isolation, supervision, structured capture and the out-of-scope check are identical on every backend.
+
+> ⚠️ **Prerequisite.** Whichever backend you pick must be installed on the same machine. Without it the plugin installs but the skill cannot do anything: its first step, `doctor`, reports `ok=false` and stops. It never installs dependencies or rewrites configuration on its own.
 
 **Fits:** tasks with a clear boundary that can be finished independently, with an enumerable set of files; using a cheaper executor for volume while the host only plans and reviews; work that deserves an isolated worktree, reviewed by a human before it lands.
 
@@ -47,17 +49,21 @@
 ## Requirements
 
 - **Python 3.10+** (standard library only, no `pip install`)
-- **WorkBuddy / CodeBuddy CLI** — the script probes for a `codebuddy` executable and for the CLI embedded in a local WorkBuddy install; set `WB_CLI` to point at one explicitly
+- **One supported CLI executor** — pick with `--executor` or `WB_EXECUTOR`:
+  - `workbuddy` (default): the script probes for a `codebuddy` executable and for the CLI embedded in a local WorkBuddy install; set `WB_CLI` to point at one explicitly
+  - `codex`, `claude`, `aider`: found on `PATH`, or via `WB_CLI`
+  - `custom`: `WB_CLI` (the executable) plus `WB_CLI_ARGV` (a JSON array argument template, see below)
 - **Git** — optional. Used for worktree isolation and diff capture; a non-Git directory degrades to in-place execution
-- An account or plan that is allowed to use `deepseek-v4.1-flash`
+- On the `workbuddy` backend, an account or plan that is allowed to use `deepseek-v4.1-flash`
 
 Check the environment first:
 
 ```bash
 python <SKILL_DIR>/scripts/wb_exec.py doctor
+python <SKILL_DIR>/scripts/wb_exec.py doctor --executor codex   # check another backend
 ```
 
-It returns JSON with `ok` / `cli` (the resolved entry point) / `cli_version` / `git` / `is_git_repo` / `state_root`. When `ok=false` or `cli_error` is non-empty, stop and hand the raw output to the user — do not install anything or change configuration.
+It returns JSON with `ok` / `cli` (the resolved entry point) / `cli_version` / `executor` / `available_executors` / `git` / `is_git_repo` / `state_root`. When `ok=false` or `cli_error` is non-empty, stop and hand the raw output to the user — do not install anything or change configuration.
 
 ---
 
@@ -193,8 +199,8 @@ The result (excerpt):
 
 | Subcommand | Arguments | Purpose |
 |---|---|---|
-| `doctor` | `[--cwd]` | Self-check: CLI, git, environment, state directory |
-| `dispatch` | `--task` `[--cwd]` `[--timeout 1800]` `[--worktree auto\|off]` `[--dry-run]` | Dispatch in the background, return a `job_id` immediately |
+| `doctor` | `[--cwd]` `[--executor]` | Self-check: CLI, git, environment, state directory, available backends |
+| `dispatch` | `--task` `[--cwd]` `[--timeout 1800]` `[--worktree auto\|off]` `[--executor]` `[--dry-run]` | Dispatch in the background, return a `job_id` immediately |
 | `run` | same, minus `--dry-run` | Run in the foreground and wait for collection |
 | `status` | `--job` | Query the job state |
 | `collect` | `--job` `[--wait]` `[--wait-timeout 1800]` | Collect the result; `--wait` blocks until the job ends |
@@ -205,7 +211,24 @@ General notes:
 
 - `--timeout` is in seconds and defaults to `1800`
 - `--worktree auto` (default) creates a dedicated worktree on a Git repository; `off` runs in place
-- **The executor is fixed**: WorkBuddy / DeepSeek V4.1 Flash at effort `max`, hard-coded into the script. The CLI **has no** `--model` or `--effort` flag — passing one is rejected by argparse on purpose. When the account refuses that model the run fails; **do not retry with a different model**, hand `stderr.log` to the user
+- `--executor` selects the backend (`workbuddy` by default; also `codex`, `claude`, `aider`, `custom`). `WB_EXECUTOR` sets the same default through the environment
+- **The `workbuddy` backend is pinned**: DeepSeek V4.1 Flash at effort `max`, hard-coded, with no `--model` or `--effort` flag (passing one is rejected by argparse on purpose). When the account refuses that model the run fails; **do not retry with a different model**, hand `stderr.log` to the user. Other backends use whatever model their own CLI is configured with — `wb-exec` injects no model or effort flag for them
+
+### Choosing a backend
+
+```bash
+# default: WorkBuddy / CodeBuddy
+python <SKILL_DIR>/scripts/wb_exec.py dispatch --task t.json --cwd <repo>
+
+# any other supported CLI
+python <SKILL_DIR>/scripts/wb_exec.py dispatch --task t.json --cwd <repo> --executor claude
+
+# anything else, through an argument template
+WB_CLI=my-agent WB_CLI_ARGV='["run","--prompt","{prompt}","--dir","{cwd}"]' \
+  python <SKILL_DIR>/scripts/wb_exec.py dispatch --task t.json --cwd <repo> --executor custom
+```
+
+The `custom` template may use `{prompt}`, `{cwd}`, `{schema}`, `{session}`, `{model}` and `{effort}`; each placeholder is expanded for the job before the process starts. A backend name that does not exist fails loudly rather than silently falling back to WorkBuddy.
 
 ---
 
