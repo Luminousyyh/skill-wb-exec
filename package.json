@@ -9,6 +9,7 @@
     "dsh/cordis.patch.yml",
     "skills",
     "docs",
+    "screenshots.json",
     "README.md",
     "LICENSE"
   ],
