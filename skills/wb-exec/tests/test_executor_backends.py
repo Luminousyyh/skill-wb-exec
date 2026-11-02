@@ -31,12 +31,17 @@ class ExecutorBackendTests(unittest.TestCase):
         uuid.uuid4 = self._real_uuid4
 
     def test_workbuddy_argv_is_unchanged_by_the_backend_registry(self):
-        """The pre-refactor argv, spelled out literally."""
+        """The pre-refactor argv, spelled out literally.
+
+        The prompt is deliberately absent: it now travels on stdin, because a
+        multi-line argv prompt is truncated to its first line by this CLI.
+        """
         expected = ["node", "cli"] + [
-            "-p", self.prompt,
+            "-p",
             "--output-format", "stream-json",
             "--json-schema", self.schema,
             "-y",
+            "--permission-mode", "bypassPermissions",
             "--allowedTools", "Read,Write,Edit,Glob,Grep,Bash",
             "--add-dir", str(self.cwd),
             "--session-id", str(uuid.uuid4()),
@@ -48,6 +53,38 @@ class ExecutorBackendTests(unittest.TestCase):
             "workbuddy", ["node", "cli"], self.prompt, self.cwd, self.schema, self.refs
         )
         self.assertEqual(expected, actual)
+
+    def test_workbuddy_does_not_put_a_multiline_prompt_on_argv(self):
+        """A multi-line prompt on argv is truncated to its first line.
+
+        Measured against codebuddy 2.174.0: "Line one AAA.\\nLine two BBB."
+        arrives as "AAA.", while the same text on stdin arrives intact. The
+        prompt must therefore never appear in argv for this backend.
+        """
+        multiline = "first line\nsecond line\nthird line"
+        argv = wb_exec.build_executor_argv(
+            "workbuddy", ["node", "cli"], multiline, self.cwd, self.schema, self.refs
+        )
+        self.assertNotIn(multiline, argv)
+        for part in ("first line", "second line", "third line"):
+            self.assertNotIn(part, argv)
+
+    def test_workbuddy_opens_tools_in_non_interactive_runs(self):
+        """`-y` alone is not enough; without --permission-mode nothing is writable.
+
+        Measured against codebuddy 2.174.0: `-y` is documented as "Bypass
+        permission prompts (HIGH/CRITICAL still ask)", and a non-interactive
+        `-p` run has no prompt to answer. Every task therefore came back with
+        blockers and an untouched worktree, exit code 0. Passing
+        --permission-mode bypassPermissions makes the write actually land.
+        """
+        argv = wb_exec.build_executor_argv(
+            "workbuddy", ["node", "cli"], self.prompt, self.cwd, self.schema, self.refs
+        )
+        self.assertIn("--permission-mode", argv)
+        mode = argv[argv.index("--permission-mode") + 1]
+        self.assertIn(mode, ("bypassPermissions", "acceptEdits", "dontAsk"))
+        self.assertIn("-y", argv)
 
     def test_workbuddy_keeps_its_pinned_model_and_effort(self):
         self.assertEqual("deepseek-v4.1-flash", wb_exec.EXECUTOR_MODEL)

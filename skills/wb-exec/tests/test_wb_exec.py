@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
 import argparse
+import contextlib
 import importlib.util
+import io
 import json
 import tempfile
 import unittest
@@ -93,6 +95,29 @@ class WorkBuddyEnvironmentTests(unittest.TestCase):
         }
         result = wb_exec.extract_result(json.dumps(event))
         self.assertFalse(result["ok"])
+
+
+class CollectEnvelopeTests(unittest.TestCase):
+    def test_collect_envelope_carries_the_protocol_version(self):
+        """A host must be able to tell which envelope shape it is reading."""
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            jd = state / "jobs" / "job1"
+            jd.mkdir(parents=True)
+            (jd / "job.json").write_text(json.dumps({"job_id": "job1"}), encoding="utf-8")
+            (jd / "exit.json").write_text(json.dumps({"status": "done"}), encoding="utf-8")
+            (jd / "result.json").write_text(json.dumps({"ok": True, "summary": "s"}),
+                                            encoding="utf-8")
+
+            buf = io.StringIO()
+            with mock.patch.object(wb_exec, "STATE_ROOT", state), \
+                    contextlib.redirect_stdout(buf):
+                code = wb_exec._emit_collect("job1", wait=False)
+
+        out = json.loads(buf.getvalue())
+        self.assertEqual(0, code)
+        self.assertIsInstance(out["protocol"], int)
+        self.assertEqual(1, out["protocol"])
 
 
 if __name__ == "__main__":

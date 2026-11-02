@@ -24,6 +24,9 @@ import uuid
 from pathlib import Path
 
 SCHEMA_VERSION = 1
+# Version of the collect envelope's shape. Bumped only when the shape changes,
+# so a host written against an older release can tell what it is reading.
+PROTOCOL_VERSION = 1
 STATE_ROOT = Path(os.environ.get("WB_EXEC_HOME") or (Path.home() / ".wb-exec"))
 DEFAULT_TIMEOUT = 1800
 HEARTBEAT_STALE = 90
@@ -225,11 +228,27 @@ def build_executor_argv(backend: str, cli: list[str], prompt: str, run_cwd: Path
     """
     session = str(uuid.uuid4())
     if backend == "workbuddy":
+        # The prompt is NOT placed on the command line for this backend. It goes
+        # in on stdin, and `-p` acts as the "read the prompt from stdin" switch.
+        # Measured against codebuddy 2.174.0: a multi-line argv prompt is
+        # truncated to its first line ("Line one AAA.\nLine two BBB." arrives as
+        # "AAA."), while the same text piped on stdin arrives intact, and a long
+        # single-line argv prompt works fine. build_prompt() always returns
+        # multi-line text, so on argv this backend silently received an empty
+        # task body.
         argv = cli + [
-            "-p", prompt,
+            "-p",
             "--output-format", "stream-json",
             "--json-schema", schema,
             "-y",
+            # `-y` is documented as "Bypass permission prompts (HIGH/CRITICAL
+            # still ask)", which is not enough on its own: in a non-interactive
+            # `-p` run there is no prompt to answer, so Write/Edit/Bash were
+            # refused and every task reported blockers without touching a file.
+            # --permission-mode is what actually opens the tools for this run.
+            # Measured: with it a write lands on disk; without it the executor
+            # returns "本会话被设置为只读" and changes nothing.
+            "--permission-mode", "bypassPermissions",
             "--allowedTools", "Read,Write,Edit,Glob,Grep,Bash",
             "--add-dir", str(run_cwd),
             "--session-id", session,
@@ -648,11 +667,22 @@ def _monitor_body(job_id: str) -> int:
     err_path = jd / "stderr.log"
     status = "failed"
     code = None
+    # The workbuddy backend takes its prompt on stdin rather than on argv, so a
+    # multi-line task body survives (argv truncates it to the first line).
+    prompt_on_stdin = meta.get("executor") == "workbuddy"
     with out_path.open("wb") as out, err_path.open("wb") as err:
         proc = subprocess.Popen(
             argv, cwd=meta["cwd"], env=env, stdout=out, stderr=err,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE if prompt_on_stdin else subprocess.DEVNULL,
         )
+        if prompt_on_stdin:
+            try:
+                proc.stdin.write((meta.get("prompt") or "").encode("utf-8"))
+                proc.stdin.close()
+            except (BrokenPipeError, OSError):
+                # The child exited before reading its prompt; the exit code and
+                # stderr below are the real signal, so do not mask them here.
+                pass
         while proc.poll() is None:
             if (jd / "cancel.request").exists():
                 proc.kill()
@@ -867,6 +897,10 @@ def _assemble(args) -> tuple[list[str], dict, Path]:
                        if backend == "workbuddy"
                        else f"后端 {backend}：模型与档位由该 CLI 自己的配置决定"),
         "argv": argv,
+        # The workbuddy backend delivers the prompt on stdin, not on argv; the
+        # monitor reads it back from here. Kept in the job record so a run can
+        # be reproduced exactly, which argv alone no longer would.
+        "prompt": prompt,
         "env": env,
         "timeout": int(args.timeout),
         "created_at": time.time(),
@@ -942,12 +976,14 @@ def _emit_collect(job_id: str, wait: bool, deadline: float | None = None) -> int
         if st["status"] not in ("running", "stalled"):
             break
         if not wait or (deadline and time.time() > deadline):
-            print(json.dumps(st, ensure_ascii=False, indent=2))
+            print(json.dumps({"protocol": PROTOCOL_VERSION, **st},
+                             ensure_ascii=False, indent=2))
             return 0
         time.sleep(0.5)
     result = read_json(jd / "result.json") or {"ok": False}
     meta = read_json(jd / "job.json") or {}
-    out = {"ok": st["status"] == "done" and bool(result.get("ok")),
+    out = {"protocol": PROTOCOL_VERSION,
+           "ok": st["status"] == "done" and bool(result.get("ok")),
            "job_id": job_id, "status": st["status"],
            "exit_code": st.get("exit_code"), "elapsed_s": st.get("elapsed_s"),
            # Whether isolation actually happened decides whether a diff exists at
