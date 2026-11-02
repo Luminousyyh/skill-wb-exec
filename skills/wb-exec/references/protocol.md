@@ -59,10 +59,17 @@
 
 - Overlap is decided by path segment: `src/auth` does not overlap `src/authz`.
 - An **empty** `owned_paths` is treated as "could touch anything", so it conflicts with every other job. That is deliberate: an empty list means "new files only", and a new file can land anywhere.
-- Claims from jobs with an `exit.json`, or with no heartbeat at all, are pruned on the next acquisition, so a crashed process cannot wedge the lock permanently.
+- Claims from jobs with an `exit.json`, or whose recorded pid is provably dead, are pruned on the next acquisition, so a crashed process cannot wedge the lock permanently.
+- Liveness is decided by the **pid**, not by a missing heartbeat. A supervisor that crashed between taking the claim and writing its first heartbeat leaves no heartbeat while the CLI it spawned may still be editing the claimed paths; pruning on "no heartbeat" alone admitted a new job against those files. When the pid cannot be probed (no permission, no recorded pid), the old no-heartbeat heuristic is kept so the lock cannot wedge forever.
 - A `dispatch.lock` that **exists but cannot be parsed** is **refused**, not treated as empty. Coercing a damaged lock to "no claims" admitted every job and then rewrote the file with only the new claim, discarding live holds with no message. `--dry-run` reports the same damage as a blocker instead of promising a clean slot.
 - `--dry-run` reports would-be blockers in `would_block` and claims nothing.
 - The lock is scoped to one `WB_EXEC_HOME`. It stops two cooperating jobs from colliding; it is not a security boundary.
+
+## `jobs` (read-only)
+
+`jobs` prints the live claims (with `owned_paths`, `pid`, `live` and `age_s`) and the recent job history (status, goal, worktree presence), newest first, capped by `--limit` (default 20). It **changes nothing**: no pruning, no releasing, no cleanup. Exit code stays 0 even when the lock is damaged — the damage is reported in `lock_warning`, because a read command should still be able to show you the damage.
+
+Without it, a user refused by the lock could only delete `dispatch.lock` by hand, which is the one thing README warns against.
 
 ## Output cap
 

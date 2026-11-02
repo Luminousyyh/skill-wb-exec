@@ -512,6 +512,82 @@ class LockBusy(RuntimeError):
         super().__init__("owned_paths 与正在运行的作业重叠")
 
 
+def _pid_alive(pid) -> bool | None:
+    """Whether a recorded pid is still running.
+
+    Returns True/False when it can be determined, and None when it cannot -- so
+    the caller can fall back to a time-based guess instead of treating "unknown"
+    as "dead", which would prune a live claim.
+
+    On POSIX, signal 0 performs the permission and existence check without
+    delivering anything. On Windows there is no signal 0, so the process table
+    is consulted through ctypes; any failure there degrades to None.
+    """
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            STILL_ACTIVE = 259
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                # Access denied usually means it exists but is not ours; report
+                # unknown rather than dead.
+                return None
+            try:
+                code = wintypes.DWORD()
+                if kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                    return code.value == STILL_ACTIVE
+                return None
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:  # noqa: BLE001
+            return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        # Exists but owned by someone else, or the platform refuses the probe.
+        return None
+    return True
+
+
+def _claim_is_live(claim: dict) -> bool:
+    """Whether a claim still belongs to a running job.
+
+    A claim is dead when the job finished (exit.json) or when its process is
+    provably gone. It is NOT dead merely because the heartbeat file is missing:
+    a supervisor that crashed between taking the claim and writing its first
+    heartbeat leaves no heartbeat, while the CLI it spawned may still be
+    editing the very paths the claim protects. That window was the one real
+    safety hole in the lock, so liveness is now decided by the pid whenever it
+    can be probed, with the old heuristic only as a fallback.
+    """
+    job_id = claim.get("job_id", "")
+    other_dir = STATE_ROOT / "jobs" / job_id
+    if (other_dir / "exit.json").is_file():
+        return False
+    has_heartbeat = (other_dir / "heartbeat.json").is_file()
+    if has_heartbeat:
+        return True
+    alive = _pid_alive(claim.get("pid"))
+    if alive is None:
+        # Cannot tell: keep the old behaviour (no heartbeat means prunable) so a
+        # platform without a working probe does not wedge the lock forever.
+        return False
+    return alive
+
+
 def _lock_path() -> Path:
     return STATE_ROOT / LOCK_NAME
 
@@ -557,10 +633,7 @@ def _acquire_claim(owned_paths: list[str], job_id: str) -> list[dict]:
 
         live, blocked = [], []
         for claim in claims:
-            other = claim.get("job_id", "")
-            other_dir = STATE_ROOT / "jobs" / other
-            # Finished or vanished jobs must not block forever.
-            if (other_dir / "exit.json").is_file() or not (other_dir / "heartbeat.json").is_file():
+            if not _claim_is_live(claim):
                 continue
             live.append(claim)
             if _overlaps(owned_paths, claim.get("owned_paths") or []):
@@ -641,12 +714,11 @@ def _overlapping_jobs(owned_paths: list[str]) -> list[dict]:
 
     live = []
     for claim in claims:
-        other = claim.get("job_id", "")
-        other_dir = STATE_ROOT / "jobs" / other
-        if (other_dir / "exit.json").is_file() or not (other_dir / "heartbeat.json").is_file():
+        if not _claim_is_live(claim):
             continue
         if _overlaps(owned_paths, claim.get("owned_paths") or []):
-            live.append({"job_id": other, "owned_paths": claim.get("owned_paths") or []})
+            live.append({"job_id": claim.get("job_id", ""),
+                         "owned_paths": claim.get("owned_paths") or []})
     return live
 
 
@@ -1071,14 +1143,60 @@ def cmd_cancel(args) -> int:
 
 
 def cmd_jobs(args) -> int:
-    root = STATE_ROOT / "jobs"
-    rows = []
-    if root.is_dir():
-        for d in sorted(root.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)[: args.limit]:
-            st = read_json(d / "job.json") or {}
-            rows.append({"job_id": st.get("job_id", d.name), "goal": (st.get("goal") or "")[:60],
-                         "status": job_status(d.name).get("status") if (d / "job.json").exists() else "?"})
-    print(json.dumps(rows, ensure_ascii=False, indent=2))
+    """List live claims and past jobs, read-only.
+
+    Without this, a user refused by the lock has no way to see what is holding
+    the paths except to delete dispatch.lock by hand -- the one thing README
+    warns against. This prints the state and changes nothing: no pruning, no
+    cleanup, no linking to the rejected "automatic worktree cleanup".
+
+    Exit code is 0 even when the lock is damaged; the damage is reported in the
+    payload, because a read command should still be able to show you the damage.
+    """
+    limit = int(getattr(args, "limit", 20) or 20)
+    out: dict = {"schema_version": SCHEMA_VERSION,
+                 "state_root": str(STATE_ROOT),
+                 "claims": [], "jobs": [], "lock_warning": None}
+
+    path = _lock_path()
+    if path.is_file():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, list):
+                raise ValueError("dispatch.lock 顶层不是数组")
+            for claim in raw:
+                out["claims"].append({
+                    "job_id": claim.get("job_id", ""),
+                    "owned_paths": claim.get("owned_paths") or [],
+                    "pid": claim.get("pid"),
+                    "live": _claim_is_live(claim),
+                    "age_s": round(time.time() - float(claim.get("since") or 0), 1),
+                })
+        except Exception as exc:  # noqa: BLE001
+            out["lock_warning"] = f"dispatch.lock 无法解析：{exc}"
+
+    jobs_root = STATE_ROOT / "jobs"
+    if jobs_root.is_dir():
+        entries = []
+        for d in jobs_root.iterdir():
+            if not d.is_dir():
+                continue
+            meta = read_json(d / "job.json") or {}
+            exit_info = read_json(d / "exit.json") or {}
+            entries.append({
+                "job_id": d.name,
+                "status": exit_info.get("status") or meta.get("status") or "unknown",
+                "goal": (meta.get("goal") or "")[:80],
+                "owned_paths": meta.get("owned_paths") or [],
+                "worktree": meta.get("worktree"),
+                "worktree_present": bool(meta.get("worktree") and Path(meta["worktree"]).exists()),
+                "created_at": meta.get("created_at"),
+            })
+        entries.sort(key=lambda j: j.get("created_at") or 0, reverse=True)
+        out["jobs"] = entries[:limit]
+        out["jobs_total"] = len(entries)
+
+    print(json.dumps(out, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -1155,8 +1273,9 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--job", required=True)
     x.set_defaults(func=cmd_cancel)
 
-    j = sub.add_parser("jobs", help="列出最近作业")
-    j.add_argument("--limit", type=int, default=10)
+    j = sub.add_parser("jobs", help="列出活动占用与历史作业（只读）")
+    j.add_argument("--limit", type=int, default=20,
+                   help="最多列出多少个历史作业，默认 20")
     j.set_defaults(func=cmd_jobs)
 
     doc = sub.add_parser("doctor", help="自检：CLI、git、环境")
