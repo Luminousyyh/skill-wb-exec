@@ -191,7 +191,7 @@ return {"required": bool(reasons), "reasons": reasons}
 | 测试数 | **36**（+3 subtests） | 全程离线，不调用模型 |
 | 测试耗时 | ~7 s | |
 | 代码行数 | **1092** 行 | 纯标准库，Python 3.10+ |
-| 打包体积 | **413.1 kB** / 33 文件 | 大头是 4 张矢量图的 PNG |
+| 打包体积 | **425.0 kB** / 37 文件 | 大头是 4 张矢量图的 PNG |
 | 执行体后端 | **5** | workbuddy（默认）/ codex / claude / aider / custom |
 | 默认超时 | 1800 s | 心跳每 5 s 写一次，90 s 无心跳判 `stalled` |
 | 退出码 | 0 / 1 / 3 / 4 | 见下文缺陷 2 |
