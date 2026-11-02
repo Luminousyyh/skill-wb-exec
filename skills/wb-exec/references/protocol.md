@@ -60,8 +60,13 @@
 - Overlap is decided by path segment: `src/auth` does not overlap `src/authz`.
 - An **empty** `owned_paths` is treated as "could touch anything", so it conflicts with every other job. That is deliberate: an empty list means "new files only", and a new file can land anywhere.
 - Claims from jobs with an `exit.json`, or with no heartbeat at all, are pruned on the next acquisition, so a crashed process cannot wedge the lock permanently.
+- A `dispatch.lock` that **exists but cannot be parsed** is **refused**, not treated as empty. Coercing a damaged lock to "no claims" admitted every job and then rewrote the file with only the new claim, discarding live holds with no message. `--dry-run` reports the same damage as a blocker instead of promising a clean slot.
 - `--dry-run` reports would-be blockers in `would_block` and claims nothing.
 - The lock is scoped to one `WB_EXEC_HOME`. It stops two cooperating jobs from colliding; it is not a security boundary.
+
+## Output cap
+
+Each job's `stdout.jsonl` plus `stderr.log` is capped at 64 MiB by default (`WB_EXEC_LOG_CAP` overrides it). The check runs in the same supervision loop as cancel and timeout; crossing the cap kills the child, sets `status=failed`, and adds a blocker naming the limit. The value is snapshotted into `job.json` at dispatch, so a run stays reproducible. A truncated transcript therefore never reads as a completed run.
 
 ## State machine
 

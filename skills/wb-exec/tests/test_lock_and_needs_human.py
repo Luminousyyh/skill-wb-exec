@@ -57,6 +57,48 @@ class LockClaimTests(unittest.TestCase):
         wb_exec.STATE_ROOT = self._real_root
         self.tmp.cleanup()
 
+    def _write_corrupt_lock(self, payload):
+        path = wb_exec._lock_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(payload, encoding="utf-8")
+        return path
+
+    def test_corrupt_lock_refuses_instead_of_silently_admitting(self):
+        """A damaged lock must fail closed.
+
+        Before this fix an unparseable dispatch.lock was coerced to [], so every
+        job was admitted and the file was then rewritten with only the new
+        claim -- existing holds were discarded with no message. The safety file
+        failing meant safety was off, silently.
+        """
+        path = self._write_corrupt_lock('{"job_id": "orphan", ')  # truncated JSON
+        before = path.read_bytes()
+        with self.assertRaises(wb_exec.LockBusy) as ctx:
+            wb_exec._acquire_claim(["src/auth/"], "newjob")
+        holders = ctx.exception.holders
+        self.assertEqual("<corrupt-lock>", holders[0]["job_id"])
+        # The corrupt file must survive untouched: repairing is the user's call.
+        self.assertEqual(before, path.read_bytes())
+
+    def test_non_list_lock_refuses_too(self):
+        self._write_corrupt_lock('{"job_id": "orphan"}')  # valid JSON, wrong shape
+        with self.assertRaises(wb_exec.LockBusy):
+            wb_exec._acquire_claim(["src/auth/"], "newjob")
+
+    def test_missing_lock_still_admits(self):
+        """The fail-closed rule must not decay into 'refuses everything'."""
+        self.assertFalse(wb_exec._lock_path().exists())
+        live = wb_exec._acquire_claim(["src/auth/"], "newjob")
+        self.assertEqual(["newjob"], [c["job_id"] for c in live])
+
+    def test_dry_run_reports_a_corrupt_lock_as_a_blocker(self):
+        """A dry run must not promise a clean slot that dispatch would refuse."""
+        self._write_corrupt_lock('{"job_id": ')
+        blockers = wb_exec._overlapping_jobs(["src/auth/"])
+        self.assertEqual(1, len(blockers))
+        self.assertEqual("<corrupt-lock>", blockers[0]["job_id"])
+        self.assertIn("无法解析", blockers[0]["detail"])
+
     def _make_live_job(self, job_id, owned):
         d = self.state / "jobs" / job_id
         d.mkdir(parents=True, exist_ok=True)

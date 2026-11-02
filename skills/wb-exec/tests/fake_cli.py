@@ -34,6 +34,24 @@ def main() -> int:
         "blockers": [],
         "notes": "桩执行体产出，仅用于链路验证",
     }
+    # FAKE_CHATTY=<bytes>: print bulk output before the result, so the monitor's
+    # log cap can be exercised offline. A runaway executor does exactly this.
+    # The monitor polls every 0.5 s, so the flood is spread over a few seconds;
+    # otherwise the child finishes before a single poll observes the size.
+    chatty = os.environ.get("FAKE_CHATTY")
+    if chatty:
+        import time
+        total = int(chatty)
+        line = "x" * 99
+        rounds = 20
+        per_round = max(1, total // rounds)
+        for _ in range(rounds):
+            emitted = 0
+            while emitted < per_round:
+                print(line[:per_round - emitted], flush=True)
+                emitted += len(line)
+            time.sleep(0.25)
+
     events = [
         {"type": "system", "subtype": "init", "cwd": str(cwd)},
         {"type": "assistant", "message": {"content": [{"type": "text", "text": "开始执行"}]}},

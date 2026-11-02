@@ -25,6 +25,13 @@ FAKE_CLI = Path(__file__).resolve().parent / "fake_cli.py"
 
 def run_cli(args, cwd, env_extra=None, timeout=180):
     env = dict(os.environ)
+    # The dispatcher sets these on the child it spawns, and when the suite is
+    # run from inside a dispatched job it inherits them: every dispatch then
+    # trips the recursion guard and these tests fail for a reason unrelated to
+    # the code under test. Clear them so the default is a clean host; the
+    # recursion test re-adds one explicitly through env_extra.
+    for inherited in ("WB_SUBAGENT", "CROSS_CLI_COLLAB_WORKER"):
+        env.pop(inherited, None)
     env.update({
         # Point the resolver at the stub, which answers --version.
         "WB_CLI": json.dumps([sys.executable, str(FAKE_CLI)]),
@@ -161,6 +168,26 @@ class EndToEndTests(unittest.TestCase):
         jobs = self.state / "jobs"
         self.assertFalse(jobs.exists() and any(jobs.iterdir()),
                          "dry run created a job directory")
+
+    def test_runaway_output_is_capped_and_named(self):
+        """A chatty executor must not be able to fill the disk silently.
+
+        The prompt asks for short logs, which is prose addressed to a model. The
+        monitor enforces a byte cap and reports it as a blocker, so a truncated
+        transcript can never be read as a finished run.
+        """
+        self._write_task()
+        proc = run_cli(["run", "--task", str(self.task), "--cwd", str(self.repo)],
+                       self.repo,
+                       self._env(FAKE_CHATTY=str(200 * 1024), WB_EXEC_LOG_CAP="2048"),
+                       timeout=120)
+        out = parse_json(proc)
+        self.assertNotEqual("done", out["status"], out)
+        self.assertFalse(out["ok"], out)
+        blockers = " ".join(out["result"].get("blockers") or [])
+        self.assertIn("上限", blockers, f"cap not named in blockers: {blockers}")
+        # The cap is a refusal, so it must raise needs_human.
+        self.assertTrue(out["result"]["needs_human"]["required"])
 
     def test_recursion_is_refused_with_exit_code_3(self):
         """A dispatched executor must not be able to dispatch again."""

@@ -30,6 +30,11 @@ PROTOCOL_VERSION = 1
 STATE_ROOT = Path(os.environ.get("WB_EXEC_HOME") or (Path.home() / ".wb-exec"))
 DEFAULT_TIMEOUT = 1800
 HEARTBEAT_STALE = 90
+# Cap on a single job's captured output. The prompt asks the executor not to
+# print long logs, but that is prose addressed to a model on a disk shared with
+# the user's machine: a looping executor can otherwise fill it while the job
+# looks healthy. Overridable for a deliberate, large run.
+LOG_CAP_BYTES = int(os.environ.get("WB_EXEC_LOG_CAP") or 64 * 1024 * 1024)
 
 EXECUTOR_MODEL = "deepseek-v4.1-flash"
 EXECUTOR_EFFORT = "max"
@@ -532,10 +537,23 @@ def _acquire_claim(owned_paths: list[str], job_id: str) -> list[dict]:
         if path.is_file():
             try:
                 claims = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:  # noqa: BLE001
-                claims = []
+            except Exception as exc:  # noqa: BLE001
+                # A lock that exists but cannot be read is a damaged lock, not
+                # an empty one. Coercing it to [] admitted every job and then
+                # rewrote the file with only the new claim, silently discarding
+                # the live holds: the failure mode of the safety file was
+                # "safety off, nothing said". Refusing is the safe direction.
+                raise LockBusy([{
+                    "job_id": "<corrupt-lock>",
+                    "owned_paths": [f"{path}"],
+                    "detail": f"dispatch.lock 无法解析，拒绝派发以免覆盖既有占用：{exc}",
+                }]) from exc
         if not isinstance(claims, list):
-            claims = []
+            raise LockBusy([{
+                "job_id": "<corrupt-lock>",
+                "owned_paths": [f"{path}"],
+                "detail": "dispatch.lock 顶层不是数组，拒绝派发以免覆盖既有占用",
+            }])
 
         live, blocked = [], []
         for claim in claims:
@@ -604,16 +622,22 @@ def _needs_human(status: str, result: dict, bad: list[str]) -> dict:
 
 
 def _overlapping_jobs(owned_paths: list[str]) -> list[dict]:
-    """Live jobs whose owned_paths would collide with this one (dry-run report)."""
+    """Live jobs whose owned_paths would collide with this one (dry-run report).
+
+    A damaged lock is reported as a blocker rather than as "no overlap", so a
+    dry run never promises a clean slot that dispatch would then refuse.
+    """
     path = _lock_path()
     if not path.is_file():
         return []
     try:
         claims = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001
-        return []
+    except Exception as exc:  # noqa: BLE001
+        return [{"job_id": "<corrupt-lock>", "owned_paths": [f"{path}"],
+                 "detail": f"dispatch.lock 无法解析：{exc}"}]
     if not isinstance(claims, list):
-        return []
+        return [{"job_id": "<corrupt-lock>", "owned_paths": [f"{path}"],
+                 "detail": "dispatch.lock 顶层不是数组"}]
 
     live = []
     for claim in claims:
@@ -667,6 +691,7 @@ def _monitor_body(job_id: str) -> int:
     err_path = jd / "stderr.log"
     status = "failed"
     code = None
+    log_cap_hit = False
     # The workbuddy backend takes its prompt on stdin rather than on argv, so a
     # multi-line task body survives (argv truncates it to the first line).
     prompt_on_stdin = meta.get("executor") == "workbuddy"
@@ -692,9 +717,26 @@ def _monitor_body(job_id: str) -> int:
                 proc.kill()
                 status = "timeout"
                 break
+            # A runaway executor printing in a loop would fill the user's disk
+            # while the job still looks healthy. Cap it here, in the loop we
+            # already run, and name the reason so the truncation is never
+            # mistaken for a completed run. The limit is read from the job
+            # record per iteration so it can be overridden per run.
+            try:
+                cap = int(meta.get("log_cap") or LOG_CAP_BYTES)
+                if (out_path.stat().st_size + err_path.stat().st_size) > cap:
+                    proc.kill()
+                    status = "failed"
+                    log_cap_hit = cap
+                    break
+            except (OSError, TypeError, ValueError):
+                pass
             time.sleep(0.5)
         code = proc.wait()
     stop.set()
+
+    if log_cap_hit:
+        status = "failed"
 
     if status not in ("cancelled", "timeout"):
         status = "done" if code == 0 else "failed"
@@ -703,6 +745,14 @@ def _monitor_body(job_id: str) -> int:
     text = out_path.read_text(encoding="utf-8", errors="replace")
     result = extract_result(text)
     result["artifacts"] = {"stdout": str(out_path), "stderr": str(err_path)}
+    if log_cap_hit:
+        # Name the cap as the cause: a truncated transcript must never read as
+        # a finished run.
+        result["ok"] = False
+        result.setdefault("blockers", []).append(
+            f"输出超过 {log_cap_hit} 字节上限，作业被中止；提高 WB_EXEC_LOG_CAP "
+            f"或缩小任务后重跑"
+        )
 
     wt = meta.get("worktree")
     if wt and Path(wt).exists():
@@ -901,6 +951,9 @@ def _assemble(args) -> tuple[list[str], dict, Path]:
         # monitor reads it back from here. Kept in the job record so a run can
         # be reproduced exactly, which argv alone no longer would.
         "prompt": prompt,
+        # Snapshot the log cap at dispatch time so a run is reproducible and so
+        # the value can be overridden for one run without a global env var.
+        "log_cap": LOG_CAP_BYTES,
         "env": env,
         "timeout": int(args.timeout),
         "created_at": time.time(),
