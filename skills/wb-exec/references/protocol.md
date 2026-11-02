@@ -50,7 +50,18 @@
 - `ok` = status is `done` **and** the structured result was parsed. `ok=true` does not mean the code is correct; the host still has to read the patch and run acceptance.
 - `changed_files` comes from the executor's own account; `changed_files_git` comes from the real `git diff`. Trust `changed_files_git`.
 - `violations` is **always present** — `[]` on a clean run. It can only be non-empty when `owned_paths` was supplied, because without a whitelist there is nothing to violate.
+- `needs_human` is **always present**: `{"required": bool, "reasons": [...]}`. Reasons are `timeout`, `cancelled`, `failed`, `out_of_scope_writes`, `blocked`, `failing_tests`. It is derived from structured fields only — never from the wording of `summary`. Route on it; do not re-derive it from prose.
 - `isolated` on the collect envelope says whether a worktree was actually used. When it is `false`, no diff was captured at all, so an empty `changed_files_git` means "unknown", not "nothing changed".
+
+## Dispatch lock
+
+`dispatch` and `run` claim the task's `owned_paths` before creating a worktree, and release the claim when the job ends. A second dispatch whose paths overlap a live one exits **4** with `error: PATHS_LOCKED` and a `holders` list naming the blocking job.
+
+- Overlap is decided by path segment: `src/auth` does not overlap `src/authz`.
+- An **empty** `owned_paths` is treated as "could touch anything", so it conflicts with every other job. That is deliberate: an empty list means "new files only", and a new file can land anywhere.
+- Claims from jobs with an `exit.json`, or with no heartbeat at all, are pruned on the next acquisition, so a crashed process cannot wedge the lock permanently.
+- `--dry-run` reports would-be blockers in `would_block` and claims nothing.
+- The lock is scoped to one `WB_EXEC_HOME`. It stops two cooperating jobs from colliding; it is not a security boundary.
 
 ## State machine
 

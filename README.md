@@ -27,6 +27,8 @@ The default executor is **WorkBuddy / CodeBuddy (DeepSeek V4.1 Flash, effort `ma
 | **Real diff first** | The executor's `summary` is only its own account. `change.patch` and `changed_files_git` come from the actual `git diff`; when the two disagree, the diff wins |
 | **Structured capture** | A `--json-schema` constraint forces structured output; the script then adds the git diff and the out-of-scope check to produce a machine-readable `result.json` |
 | **Recursion guard** | The child process gets `WB_SUBAGENT=1`; the script refuses to dispatch when it sees that variable (exit code 3), so an executor cannot spawn another executor |
+| **Path-level dispatch lock** | A second dispatch whose `owned_paths` overlap a running job is refused (`PATHS_LOCKED`, exit code 4) instead of racing it. Disjoint paths still run in parallel. Claims from finished or dead jobs are pruned automatically |
+| **`needs_human`, not prose** | Every result carries a structured `needs_human` (`{"required": bool, "reasons": [...]}`) derived from status, `blockers`, failing tests and `violations`. "A person must decide something" is no longer something you infer by reading `summary` |
 | **Non-blocking long runs** | `dispatch` returns a `job_id` immediately; `status` polls, `collect` retrieves, and both heartbeat and timeout are observable |
 | **No dependencies** | Python standard library only, Python 3.10+ |
 
@@ -184,10 +186,16 @@ The result (excerpt):
     "blockers": [],
     "artifacts": {"patch": ".../change.patch", "stdout": ".../stdout.jsonl", "stderr": ".../stderr.log"},
     "changed_files_git": ["src/auth/mw.py"],
-    "violations": []
+    "violations": [],
+    "needs_human": {"required": false, "reasons": []}
   }
 }
 ```
+
+`needs_human` is the field to route on. It is `false` here because the status is
+`done`, there are no blockers, no failing tests and no out-of-scope writes. It
+becomes `true` with a reason list such as `["failed"]`, `["out_of_scope_writes"]`,
+`["blocked"]` or `["failing_tests"]` — never by reading the summary's wording.
 
 **Review discipline — none of these is optional:**
 
@@ -287,13 +295,30 @@ Exit codes:
 *Figure 4. The whitelist and the worktree are the security boundary — not a polite request inside a prompt.*
 
 - **Directory isolation and `owned_paths` are the real security boundary, not optional extras.** The child command includes `-y`, which skips routine permission prompts (HIGH/CRITICAL cases may still ask), so isolation plus a whitelist is what actually constrains the run
-- **Never recurse**: the executor is already forbidden to dispatch, and the host must not dispatch a second task over the same files while a worker is running
+- **Never recurse**: the executor is already forbidden to dispatch. The dispatch lock also refuses a second job whose paths overlap a running one, so the old "do not do this" convention is now enforced rather than remembered
 - **Never trigger `dispatch` from inside a WorkBuddy / CodeBuddy session**: the child process collides with that session's daemon and hangs silently — measured at 45–300 seconds with no stdout or stderr at all. Call the script from the host agent or a normal terminal
-- **Never run two jobs over the same file**: `owned_paths` of concurrent jobs must not overlap; overlapping work is serialised
+- **Overlapping work is refused, not queued**: `dispatch` exits `4` with `error: PATHS_LOCKED` and names the holding job. Widen the split, wait, or cancel the other job — do not work around it by clearing the lock file
 - **Never dump full logs at the user**: give `summary`, the relevant `tests` and `violations`; the logs stay in the `artifacts` paths for on-demand reading
 - **Never re-run by hand with `-y`**: the script already handles the permission flags; bypassing it bypasses isolation and the out-of-scope check
 - **Never clean up the user's worktree**: after `collect` the directory stays in place for review, and removal is the user's decision
 - **In-place execution on a non-Git directory** (`isolated=false`, no diff capture) leaves `owned_paths` as the only defence — **it must be written**
+- **The lock is not a security boundary either**: it stops two cooperating jobs from colliding, not a process that ignores it. Two projects with separate `WB_EXEC_HOME` do not see each other's claims
+
+---
+
+## What it deliberately does not do
+
+Ten features were considered and dropped on purpose; the reasoning is in
+[rejected-designs.md](skills/wb-exec/references/rejected-designs.md). The short
+version:
+
+| Not a | Because |
+|---|---|
+| Scheduler | Retrying is a judgement about whether the work is still wanted; a silent retry can duplicate a change you already rejected |
+| Auto-merger | An agent that both writes and grades the change has verified nothing |
+| Sandbox | A process running as your OS user can reach anything you can. This is isolation, not confinement |
+| Model switcher | A pinned executor keeps results comparable, and removes the temptation to "try another model" instead of reading `stderr.log` |
+| Mind reader | `needs_human` comes from structured fields only, never from the wording of `summary` |
 
 ---
 
@@ -331,6 +356,8 @@ python skills/wb-exec/tests/test_wb_exec.py
 Nothing calls a model. `tests/fake_cli.py` replays a stream-json transcript, so the suite runs offline.
 
 - **Unit tests** cover environment injection, a standalone CLI entry taking precedence over the embedded one, a native error result never being reported as success, plain prose never counting as a structured success, and the executor backends — including a test that pins the WorkBuddy argv so a refactor cannot change it silently.
+- **Lock tests** pin both directions: overlapping and nested paths are refused, a path prefix is not treated as a boundary (`src/auth` ≠ `src/authz`), Windows separators normalise, disjoint paths still run, and a claim left by a finished or vanished job is pruned rather than wedging the next dispatch.
+- **`needs_human` tests** pin the derivation: a clean success needs nobody, while failure, out-of-scope writes, blockers and failing tests each raise it — and passing tests alone do not.
 - **End-to-end tests** drive the real script through `dispatch` → `status` → `collect` against a temporary Git repo: a run produces a patch, the main working tree is left alone, an out-of-scope write is reported in `violations`, `--dry-run` leaves no job directory behind, and a dispatched executor cannot dispatch again (exit code 3).
 
 ## Project layout

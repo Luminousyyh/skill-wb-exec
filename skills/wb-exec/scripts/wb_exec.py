@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import shutil
@@ -454,10 +455,176 @@ def violations(changed: list[str], owned: list[str]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# 并发锁：同一批文件不允许被两个作业同时修改
+# ---------------------------------------------------------------------------
+
+LOCK_NAME = "dispatch.lock"
+
+
+def _overlaps(a: list[str], b: list[str]) -> bool:
+    """两条 owned_paths 是否可能写到同一个文件。
+
+    Absent whitelists are treated as "could touch anything", because an empty
+    list means "new files only" — and a new file could land anywhere.
+    """
+    def norm(p: str) -> str:
+        return p.replace("\\", "/").strip().rstrip("/")
+
+    left = [norm(x) for x in a if x and x.strip()]
+    right = [norm(x) for x in b if x and x.strip()]
+    if not left or not right:
+        return True
+
+    for x in left:
+        for y in right:
+            if x == y or x.startswith(y + "/") or y.startswith(x + "/"):
+                return True
+    return False
+
+
+class LockBusy(RuntimeError):
+    def __init__(self, holders: list[dict]):
+        self.holders = holders
+        super().__init__("owned_paths 与正在运行的作业重叠")
+
+
+def _lock_path() -> Path:
+    return STATE_ROOT / LOCK_NAME
+
+
+def _acquire_claim(owned_paths: list[str], job_id: str) -> list[dict]:
+    """Add a claim, or raise LockBusy naming the overlapping jobs."""
+    path = _lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    guard = path.with_suffix(".guard")
+    for _ in range(50):
+        try:
+            fd = os.open(str(guard), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            break
+        except FileExistsError:
+            time.sleep(0.1)
+    else:
+        raise LockBusy([{"job_id": "?", "owned_paths": ["<lock contention>"]}])
+
+    try:
+        claims = []
+        if path.is_file():
+            try:
+                claims = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                claims = []
+        if not isinstance(claims, list):
+            claims = []
+
+        live, blocked = [], []
+        for claim in claims:
+            other = claim.get("job_id", "")
+            other_dir = STATE_ROOT / "jobs" / other
+            # Finished or vanished jobs must not block forever.
+            if (other_dir / "exit.json").is_file() or not (other_dir / "heartbeat.json").is_file():
+                continue
+            live.append(claim)
+            if _overlaps(owned_paths, claim.get("owned_paths") or []):
+                blocked.append(claim)
+
+        if blocked:
+            raise LockBusy(blocked)
+
+        live.append({"job_id": job_id, "owned_paths": [p for p in owned_paths if p],
+                     "pid": os.getpid(), "since": time.time()})
+        path.write_text(json.dumps(live, ensure_ascii=False, indent=2), encoding="utf-8")
+        return live
+    finally:
+        try:
+            os.unlink(guard)
+        except OSError:
+            pass
+
+
+def _release_claim(job_id: str) -> None:
+    path = _lock_path()
+    try:
+        claims = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return
+    if not isinstance(claims, list):
+        return
+    remaining = [c for c in claims if c.get("job_id") != job_id]
+    try:
+        path.write_text(json.dumps(remaining, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _needs_human(status: str, result: dict, bad: list[str]) -> dict:
+    """Whether a person has to act, and why.
+
+    Deliberately derived from structured fields only. Guessing from the summary's
+    wording would make the answer depend on how the executor happened to phrase
+    things, which is exactly the failure mode this field exists to avoid.
+    """
+    reasons = []
+    if status == "timeout":
+        reasons.append("timeout")
+    elif status == "cancelled":
+        reasons.append("cancelled")
+    elif status == "failed":
+        reasons.append("failed")
+    if bad:
+        reasons.append("out_of_scope_writes")
+    if result.get("blockers"):
+        reasons.append("blocked")
+    failed_tests = [t for t in (result.get("tests") or [])
+                    if isinstance(t, dict) and t.get("status") == "fail"]
+    if failed_tests:
+        reasons.append("failing_tests")
+
+    return {"required": bool(reasons), "reasons": reasons}
+
+
+def _overlapping_jobs(owned_paths: list[str]) -> list[dict]:
+    """Live jobs whose owned_paths would collide with this one (dry-run report)."""
+    path = _lock_path()
+    if not path.is_file():
+        return []
+    try:
+        claims = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return []
+    if not isinstance(claims, list):
+        return []
+
+    live = []
+    for claim in claims:
+        other = claim.get("job_id", "")
+        other_dir = STATE_ROOT / "jobs" / other
+        if (other_dir / "exit.json").is_file() or not (other_dir / "heartbeat.json").is_file():
+            continue
+        if _overlaps(owned_paths, claim.get("owned_paths") or []):
+            live.append({"job_id": other, "owned_paths": claim.get("owned_paths") or []})
+    return live
+
+
+# ---------------------------------------------------------------------------
 # 后台监视器
 # ---------------------------------------------------------------------------
 
 def _monitor(job_id: str) -> int:
+    """Run one job, then always drop its path claim.
+
+    The claim is taken in _assemble, before the worktree exists, and has to
+    survive until the job is over — including the abnormal paths, otherwise a
+    crash would leave the paths locked until the heartbeat went stale.
+    """
+    try:
+        return _monitor_body(job_id)
+    finally:
+        _release_claim(job_id)
+
+
+def _monitor_body(job_id: str) -> int:
     jd = job_dir(job_id)
     meta = read_json(jd / "job.json") or {}
     argv = meta["argv"]
@@ -528,6 +695,11 @@ def _monitor(job_id: str) -> int:
     # without checking for the key, and protocol.md documents the field as a
     # list. Omitting it on a clean run made the documented shape a lie.
     result["violations"] = bad
+
+    # "A person must decide something" is not the same as "the run failed", and
+    # it cannot be inferred from the free-text summary. Record it structurally so
+    # the host can route on it without parsing prose.
+    result["needs_human"] = _needs_human(status, result, bad)
 
     write_json(jd / "result.json", result)
     write_json(jd / "exit.json", {
@@ -643,9 +815,15 @@ def _assemble(args) -> tuple[list[str], dict, Path]:
         cli = find_cli(backend)
         schema = json.dumps(RESULT_SCHEMA, ensure_ascii=False, separators=(",", ":"))
         argv = build_executor_argv(backend, cli, prompt, cwd, schema, refs)
+        blockers = _overlapping_jobs(task["owned_paths"])
         meta = {"job_id": job_id, "cwd": str(cwd), "worktree": None,
-                "executor": backend, "dry_run": True}
+                "executor": backend, "dry_run": True,
+                "would_block": blockers}
         return argv, meta, jd
+
+    # Claim the paths before creating a worktree, so a refusal costs nothing.
+    # The claim outlives this call: _monitor releases it when the job ends.
+    _acquire_claim(task["owned_paths"], job_id)
 
     jd.mkdir(parents=True, exist_ok=True)
 
@@ -704,11 +882,22 @@ def cmd_dispatch(args) -> int:
                           "message": "当前进程已是被派发的执行体，禁止再次派发。"},
                          ensure_ascii=False))
         return 3
-    argv, meta, jd = _assemble(args)
+    try:
+        argv, meta, jd = _assemble(args)
+    except LockBusy as exc:
+        print(json.dumps({"ok": False, "error": "PATHS_LOCKED",
+                          "message": "owned_paths 与正在运行的作业重叠，本次未派发。",
+                          "holders": exc.holders},
+                         ensure_ascii=False, indent=2))
+        return 4
     if args.dry_run:
         print(json.dumps({"ok": True, "dry_run": True, "job_id": meta["job_id"],
                           "cwd": meta["cwd"], "worktree": meta["worktree"],
-                          "argv": argv, "job_dir": str(jd)}, ensure_ascii=False, indent=2))
+                          # Say up front whether this dispatch would be refused,
+                          # so a dry run is a real rehearsal and not just argv echo.
+                          "would_block": meta.get("would_block") or [],
+                          "argv": argv, "job_dir": str(jd)},
+                         ensure_ascii=False, indent=2))
         return 0
 
     monitor_argv = [sys.executable, str(Path(__file__).resolve()), "_monitor", "--job", meta["job_id"]]
@@ -734,7 +923,14 @@ def cmd_run(args) -> int:
                           "message": "当前进程已是被派发的执行体，禁止再次派发。"},
                          ensure_ascii=False))
         return 3
-    _, meta, jd = _assemble(args)
+    try:
+        _, meta, jd = _assemble(args)
+    except LockBusy as exc:
+        print(json.dumps({"ok": False, "error": "PATHS_LOCKED",
+                          "message": "owned_paths 与正在运行的作业重叠，本次未执行。",
+                          "holders": exc.holders},
+                         ensure_ascii=False, indent=2))
+        return 4
     _monitor(meta["job_id"])
     return _emit_collect(meta["job_id"], wait=False)
 
