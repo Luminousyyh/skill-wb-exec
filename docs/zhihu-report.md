@@ -28,6 +28,10 @@
 
 ## 二、设计：拆成两个角色、两个进程
 
+![图 1　整体结构](figures/fig1-architecture.png)
+
+*图 1　整体结构。上排是安装链路：`package.json` 声明 `dsh.bundle`，装载器据此把 `entry + skill files` 挂到宿主的技能表上。右上是运行链路：`dispatch` 派生出一个 CLI 执行体，执行体只在 `worktree wt/` 里改文件，并受 `owned_paths` 白名单约束。下排自右向左是审计链路：心跳、真实 git diff、越界清单回流到审查门，由人决定合入还是重新拆一个更小的任务包。*
+
 ```
 宿主 Agent（规划 + 审查）
     │  写 JSON 任务包
@@ -55,6 +59,10 @@ wb-exec collect
 ---
 
 ## 三、机制：六个可检验的约束
+
+![图 2　一次委派的生命周期](figures/fig2-workflow.png)
+
+*图 2　一次委派的生命周期。从写任务包到 review，是一个单向流程；右下那条虚线是唯一的回路——审查不通过时不是"让同一个 Agent 再试一次"，而是重新拆一个更小的任务包。左下角两条是这套设计的地基：`acceptance` 必须是可执行命令而不是散文；argv、心跳、流式输出和 diff 全部落盘，所以事后可复核。*
 
 每个约束都能落到具体代码上，不是设计意图，是现在的行为。
 
@@ -97,6 +105,10 @@ proc = git(["worktree", "add", "-b", branch, str(wt), "HEAD"], repo)
 - 脚本**从不删除** worktree。清理是你的决定，因为它可能还留着你想看的东西
 
 于是 `collect` 里的 diff 天然是干净的：`wt` 与 `HEAD` 之间只有执行体做的事。
+
+![图 3　隔离与越界检查](figures/fig4-isolation.png)
+
+*图 3　隔离与越界检查。左边：worktree 从**派发时刻的 HEAD** 建出，所以未提交改动不会跟着进去——"from HEAD only, no user changes" 这一句是整个隔离性质的前提。右边：每个被改动的路径都要过白名单这一关，界内的进 `changed_files_git`，界外的进 `violations`；界外的处理是**报告**，不是自动回滚（"reported, never auto-reverted"）。最下面一行是三条硬约束：不 commit、不 push、不自动合入。*
 
 ### 3.3 真实 diff，而不是摘要
 
@@ -167,6 +179,10 @@ return {"required": bool(reasons), "reasons": reasons}
 ---
 
 ## 四、实测数字
+
+![图 4　状态机](figures/fig3-states.png)
+
+*图 4　状态机。`running` 是唯一"在跑"的状态，四个终态各有明确判据：拿到结构化结果 → `done`；进程退出但没有结果 → `failed`；挂钟超时 → `timeout`；取消被看到 → `cancelled`。左上角 `stalled (derived)` 是**推导**出来的，不落盘也不上报——它只是"90 秒没心跳"的一个视图，而不是第五种状态。*
 
 | 项 | 值 | 说明 |
 |---|---|---|
