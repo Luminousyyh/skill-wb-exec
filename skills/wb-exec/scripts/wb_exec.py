@@ -516,10 +516,18 @@ def _monitor(job_id: str) -> int:
             result["changed_files_git"] = diff["changed"]
             bad = violations(diff["changed"], meta.get("owned_paths", []))
             if bad:
-                result["violations"] = bad
                 status = "done" if status == "done" else status
         except Exception as exc:  # noqa: BLE001
+            bad = []
             result.setdefault("blockers", []).append(f"diff 采集失败: {exc}")
+    else:
+        # No worktree means no diff was captured, so nothing can be out of scope.
+        bad = []
+
+    # Always present, even when empty: consumers read result["violations"]
+    # without checking for the key, and protocol.md documents the field as a
+    # list. Omitting it on a clean run made the documented shape a lie.
+    result["violations"] = bad
 
     write_json(jd / "result.json", result)
     write_json(jd / "exit.json", {
@@ -625,6 +633,20 @@ def _assemble(args) -> tuple[list[str], dict, Path]:
 
     job_id = uuid.uuid4().hex[:12]
     jd = job_dir(job_id)
+
+    # A dry run must not leave anything behind: no job directory, no worktree,
+    # nothing for `jobs` to list later. Resolve the argv-only parts first and
+    # skip every side effect.
+    if getattr(args, "dry_run", False):
+        prompt = build_prompt(task, cwd)
+        backend = getattr(args, "executor", None) or _backend_env()
+        cli = find_cli(backend)
+        schema = json.dumps(RESULT_SCHEMA, ensure_ascii=False, separators=(",", ":"))
+        argv = build_executor_argv(backend, cli, prompt, cwd, schema, refs)
+        meta = {"job_id": job_id, "cwd": str(cwd), "worktree": None,
+                "executor": backend, "dry_run": True}
+        return argv, meta, jd
+
     jd.mkdir(parents=True, exist_ok=True)
 
     if args.worktree == "auto" and is_git_repo(cwd):
@@ -728,9 +750,16 @@ def _emit_collect(job_id: str, wait: bool, deadline: float | None = None) -> int
             return 0
         time.sleep(0.5)
     result = read_json(jd / "result.json") or {"ok": False}
+    meta = read_json(jd / "job.json") or {}
     out = {"ok": st["status"] == "done" and bool(result.get("ok")),
            "job_id": job_id, "status": st["status"],
            "exit_code": st.get("exit_code"), "elapsed_s": st.get("elapsed_s"),
+           # Whether isolation actually happened decides whether a diff exists at
+           # all. Surfacing it here means a caller can tell "clean run" from
+           # "ran in place, so no diff was captured" without opening job.json.
+           "isolated": bool(meta.get("isolated")),
+           "executor": meta.get("executor"),
+           "worktree": meta.get("worktree"),
            "result": result, "job_dir": str(jd)}
     print(json.dumps(out, ensure_ascii=False, indent=2))
     return 0 if out["ok"] else 1

@@ -49,7 +49,8 @@
 
 - `ok` = status is `done` **and** the structured result was parsed. `ok=true` does not mean the code is correct; the host still has to read the patch and run acceptance.
 - `changed_files` comes from the executor's own account; `changed_files_git` comes from the real `git diff`. Trust `changed_files_git`.
-- `violations` can only be non-empty when `owned_paths` was supplied.
+- `violations` is **always present** — `[]` on a clean run. It can only be non-empty when `owned_paths` was supplied, because without a whitelist there is nothing to violate.
+- `isolated` on the collect envelope says whether a worktree was actually used. When it is `false`, no diff was captured at all, so an empty `changed_files_git` means "unknown", not "nothing changed".
 
 ## State machine
 

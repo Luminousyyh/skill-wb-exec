@@ -174,6 +174,9 @@ The result (excerpt):
   "status": "done",
   "exit_code": 0,
   "elapsed_s": 42.1,
+  "isolated": true,
+  "executor": "workbuddy",
+  "worktree": ".../wt",
   "result": {
     "summary": "Added token validation middleware and 3 tests",
     "changed_files": ["src/auth/mw.py", "tests/test_mw.py"],
@@ -321,11 +324,14 @@ The tests stub the CLI, so **they run offline without WorkBuddy installed**:
 
 ```bash
 python -m unittest discover -s skills/wb-exec/tests -v
-# or
+# or one file
 python skills/wb-exec/tests/test_wb_exec.py
 ```
 
-Covered: WorkBuddy environment injection, a standalone CLI entry taking precedence over the embedded one, a native error result never being reported as success, and plain prose never counting as a structured success.
+Nothing calls a model. `tests/fake_cli.py` replays a stream-json transcript, so the suite runs offline.
+
+- **Unit tests** cover environment injection, a standalone CLI entry taking precedence over the embedded one, a native error result never being reported as success, plain prose never counting as a structured success, and the executor backends — including a test that pins the WorkBuddy argv so a refactor cannot change it silently.
+- **End-to-end tests** drive the real script through `dispatch` → `status` → `collect` against a temporary Git repo: a run produces a patch, the main working tree is left alone, an out-of-scope write is reported in `violations`, `--dry-run` leaves no job directory behind, and a dispatched executor cannot dispatch again (exit code 3).
 
 ## Project layout
 
