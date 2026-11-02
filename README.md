@@ -12,7 +12,7 @@ The default executor is **WorkBuddy / CodeBuddy (DeepSeek V4.1 Flash, effort `ma
 
 **Does not fit:** exploratory work, requirements still moving, cross-module rewrites, or anything that needs architectural judgement. Keep those in the host.
 
-![Figure 1](docs/figures/fig1-architecture.svg)
+![Figure 1](docs/figures/fig1-architecture.png)
 
 *Figure 1. Install-time registration (top row), run-time delegation to the executor, and the audit path that returns artifacts to the review gate (bottom row, right to left).*
 
@@ -34,7 +34,7 @@ The default executor is **WorkBuddy / CodeBuddy (DeepSeek V4.1 Flash, effort `ma
 
 ## How it works
 
-![Figure 2](docs/figures/fig2-workflow.svg)
+![Figure 2](docs/figures/fig2-workflow.png)
 
 *Figure 2. One delegation cycle. The host never merges on its own: review is a separate, mandatory step, and a failed attempt goes back as a smaller task package.*
 
@@ -251,7 +251,7 @@ Full field definitions and the state machine live in [protocol.md](skills/wb-exe
 
 ## States and failure handling
 
-![Figure 3](docs/figures/fig3-states.svg)
+![Figure 3](docs/figures/fig3-states.png)
 
 *Figure 3. Job states. `stalled` is derived from a missing exit file, not reported by the executor.*
 
@@ -279,7 +279,7 @@ Exit codes:
 
 ## Safety boundaries
 
-![Figure 4](docs/figures/fig4-isolation.svg)
+![Figure 4](docs/figures/fig4-isolation.png)
 
 *Figure 4. The whitelist and the worktree are the security boundary — not a polite request inside a prompt.*
 
