@@ -1,0 +1,25 @@
+{
+  "size": [12, 3.6],
+  "canvas": [26, 7.8],
+  "panels": [],
+  "nodes": [
+    { "id": "w1", "x": 0.5, "y": 4.4, "w": 3.0, "h": 1.5, "label": "Write task\npackage", "kind": "task" },
+    { "id": "w2", "x": 4.9, "y": 4.4, "w": 3.0, "h": 1.5, "label": "dispatch\nor run", "kind": "control" },
+    { "id": "w3", "x": 9.3, "y": 4.4, "w": 3.0, "h": 1.5, "label": "Executor\nworks", "kind": "q" },
+    { "id": "w4", "x": 13.7, "y": 4.4, "w": 3.0, "h": 1.5, "label": "status +\nheartbeat", "kind": "control" },
+    { "id": "w5", "x": 18.1, "y": 4.4, "w": 3.0, "h": 1.5, "label": "collect\nresult", "kind": "control" },
+    { "id": "w6", "x": 22.5, "y": 4.4, "w": 3.0, "h": 1.5, "label": "review,\nthen apply", "kind": "output", "icon": "check" }
+  ],
+  "edges": [
+    { "source": "w1", "target": "w2", "label": "--task", "label_at": [4.2, 5.25] },
+    { "source": "w2", "target": "w3", "label": "argv", "label_at": [8.6, 5.25] },
+    { "source": "w3", "target": "w4", "label": "wait", "label_at": [13.0, 5.25] },
+    { "source": "w4", "target": "w5", "label": "status", "label_at": [17.4, 5.25] },
+    { "source": "w5", "target": "w6", "label": "patch", "label_at": [21.8, 5.25] },
+    { "source": "w6", "target": "w1", "points": [[24.0, 4.4], [24.0, 2.3], [2.0, 2.3], [2.0, 4.4]], "dashed": true, "label": "re-dispatch a smaller package", "label_at": [13.0, 2.05] }
+  ],
+  "annotations": [
+    { "x": 0.5, "y": 1.3, "text": "Acceptance = executable commands", "font_size": 8 },
+    { "x": 0.5, "y": 0.8, "text": "argv, heartbeat, stream, diff on disk", "font_size": 8 }
+  ]
+}

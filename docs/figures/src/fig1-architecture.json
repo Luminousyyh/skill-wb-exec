@@ -1,0 +1,40 @@
+{
+  "size": [11.25, 4.5],
+  "canvas": [22.5, 9.0],
+  "panels": [
+    { "x": 0.4, "y": 5.2, "w": 6.4, "h": 3.3, "label": "Host (DSH)" },
+    { "x": 8.0, "y": 5.2, "w": 6.4, "h": 3.3, "label": "Plugin package" },
+    { "x": 15.6, "y": 5.2, "w": 6.4, "h": 3.3, "label": "Executor" },
+    { "x": 15.6, "y": 0.6, "w": 6.4, "h": 3.3, "label": "Isolation" },
+    { "x": 8.0, "y": 0.6, "w": 6.4, "h": 3.3, "label": "Artifacts" },
+    { "x": 0.4, "y": 0.6, "w": 6.4, "h": 3.3, "label": "Review gate" }
+  ],
+  "nodes": [
+    { "id": "a1", "x": 0.8, "y": 6.2, "w": 5.6, "h": 1.5, "label": "Main agent", "kind": "control" },
+    { "id": "b1", "x": 8.4, "y": 7.0, "w": 5.6, "h": 0.8, "label": "package.json: dsh.bundle", "kind": "shared" },
+    { "id": "b2", "x": 8.4, "y": 5.9, "w": 5.6, "h": 0.8, "label": "entry + skill files", "kind": "shared" },
+    { "id": "c1", "x": 16.0, "y": 7.0, "w": 5.6, "h": 0.8, "label": "wb_exec.py dispatch", "kind": "control" },
+    { "id": "c2", "x": 16.0, "y": 5.9, "w": 5.6, "h": 0.8, "label": "WorkBuddy CLI (V4.1 Flash)", "kind": "q" },
+    { "id": "d1", "x": 16.0, "y": 2.3, "w": 5.6, "h": 0.9, "label": "worktree wt/ (isolated)", "kind": "state" },
+    { "id": "d2", "x": 16.0, "y": 1.1, "w": 5.6, "h": 0.9, "label": "owned_paths whitelist", "kind": "task" },
+    { "id": "e1", "x": 8.4, "y": 2.5, "w": 5.6, "h": 0.8, "label": "job.json + heartbeat", "kind": "input" },
+    { "id": "e2", "x": 8.4, "y": 1.5, "w": 5.6, "h": 0.8, "label": "change.patch (real diff)", "kind": "input" },
+    { "id": "e3", "x": 8.4, "y": 0.75, "w": 5.6, "h": 0.7, "label": "violations", "kind": "noise" },
+    { "id": "f1", "x": 0.8, "y": 1.5, "w": 5.6, "h": 1.6, "label": "collect, review,\napply", "kind": "output", "icon": "check" }
+  ],
+  "edges": [
+    { "source": "a1", "target": "b1", "points": [[6.4, 6.95], [7.2, 6.95], [7.2, 7.4], [8.4, 7.4]], "label": "install", "label_at": [7.2, 6.6] },
+    { "source": "b1", "target": "b2", "points": [[11.2, 7.0], [11.2, 6.7]], "label": "declares", "label_at": [12.5, 6.85] },
+    { "source": "b2", "target": "c1", "points": [[14.0, 6.3], [14.8, 6.3], [14.8, 7.4], [16.0, 7.4]], "label": "publishes", "label_at": [14.8, 6.05] },
+    { "source": "c1", "target": "c2", "points": [[18.8, 7.0], [18.8, 6.7]], "label": "spawn", "label_at": [20.1, 6.85] },
+    { "source": "c2", "target": "d1", "points": [[18.8, 5.9], [18.8, 3.2]], "label": "edits", "label_at": [20.0, 4.55] },
+    { "source": "d1", "target": "e1", "points": [[16.0, 2.95], [14.0, 2.95]], "label": "heartbeat", "label_at": [15.0, 3.2] },
+    { "source": "d1", "target": "e2", "points": [[16.0, 2.3], [15.4, 2.3], [15.4, 1.9], [14.0, 1.9]], "label": "git diff", "label_at": [15.4, 2.62] },
+    { "source": "d2", "target": "e3", "points": [[16.0, 1.55], [15.0, 1.55], [15.0, 1.1], [14.0, 1.1]], "label": "path check", "label_at": [15.0, 1.78] },
+    { "source": "e1", "target": "f1", "points": [[8.4, 2.9], [7.4, 2.9], [7.4, 2.5], [6.4, 2.5]], "label": "status", "label_at": [7.4, 3.15] },
+    { "source": "e2", "target": "f1", "points": [[8.4, 1.9], [7.4, 1.9], [7.4, 2.1], [6.4, 2.1]], "label": "patch", "label_at": [7.4, 1.65] },
+    { "source": "e3", "target": "f1", "points": [[8.4, 1.1], [7.0, 1.1], [7.0, 1.7], [6.4, 1.7]], "label": "audit", "label_at": [7.0, 0.85] },
+    { "source": "f1", "target": "a1", "points": [[3.6, 3.1], [3.6, 6.2]], "dashed": true, "label": "re-dispatch smaller", "label_at": [5.2, 4.65] }
+  ],
+  "annotations": []
+}

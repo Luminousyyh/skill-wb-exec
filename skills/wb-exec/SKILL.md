@@ -1,91 +1,91 @@
 ---
 name: wb-exec
-description: 把边界明确的编码/重构/补测任务派发给 WorkBuddy 无头执行体（DeepSeek V4.1 Flash）执行，回收结构化结论与真实 diff。当任务可独立完成、文件范围可枚举、主控只想做规划与审查而不亲自写代码时使用。
-whenToUse: 需要把"实现类"子任务外包给另一个 CLI 智能体时；想用便宜的执行体跑量、由自己（Kimi Code）负责规划与审查时；需要独立 worktree 隔离改动时。
+description: Delegate bounded coding, refactoring and test-writing tasks to a headless WorkBuddy executor (DeepSeek V4.1 Flash) and collect a structured result plus the real diff. Use when the task can be finished independently, the file set is enumerable, and the host agent only wants to plan and review instead of writing code itself.
+whenToUse: When implementation-shaped subtasks should be outsourced to another CLI agent; when you want a cheaper executor for volume while you (the host) keep planning and review; when changes need an isolated worktree.
 ---
 
 # wb-exec
 
-你是主控，负责规划、监督与审查。**实现这件事由 WorkBuddy 子进程做，你不亲自写业务代码。**
+You are the host: you plan, supervise and review. **The WorkBuddy subprocess does the implementation; you do not write business code yourself.**
 
-所有命令都用本 skill 的绝对目录，不要依赖终端当前目录：
+Always address the script through this skill's absolute directory, never through the terminal's current directory:
 
 ```
-python <SKILL_DIR>/scripts/wb_exec.py <子命令> ...
+python <SKILL_DIR>/scripts/wb_exec.py <subcommand> ...
 ```
 
-Windows 上若 `python` 不在 PATH，改用 `py -3` 或本机 Python 绝对路径。
+On Windows, if `python` is not on `PATH`, use `py -3` or the absolute path of a local Python.
 
-## 0. 先自检（每个会话最多一次）
+## 0. Self-check first (at most once per session)
 
 ```
 python <SKILL_DIR>/scripts/wb_exec.py doctor
 ```
 
-返回 JSON：`ok` / `cli`（实际可执行入口）/ `cli_version` / `git` / `is_git_repo` / `state_root`。
-`ok=false` 或 `cli_error` 有值 → 停下来，把原文报给用户，不要自己安装或改配置。
+Returns JSON with `ok` / `cli` (the resolved entry point) / `cli_version` / `git` / `is_git_repo` / `state_root`.
+`ok=false` or a non-empty `cli_error` → stop, report the raw output to the user, and do not install or reconfigure anything yourself.
 
-## 1. 写任务包（这是你最重要的工作）
+## 1. Write the task package (this is your most important job)
 
-任务包是 JSON，字段含义见 `references/protocol.md`，示例见 `assets/task.example.json`。三条硬要求：
+The task package is JSON; field definitions are in `references/protocol.md` and an example is in `assets/task.example.json`. Three hard rules:
 
-1. `goal` 一句话说清"做完之后什么变了"，不写实现步骤。
-2. `owned_paths` 必须能枚举。给目录就写 `src/auth/`，给文件就写全路径；**留空意味着执行体只允许新建文件**。
-3. `acceptance` 写成可执行命令（`pytest -q tests/test_auth.py`），不要写"确保正确"。
+1. `goal` says in one sentence what changed once the work is done. No implementation steps.
+2. `owned_paths` must be enumerable. For a directory write `src/auth/`; for a file write the full path. **An empty list means the executor may only create new files.**
+3. `acceptance` is executable commands (`pytest -q tests/test_auth.py`), never "make sure it works".
 
-任务包先落盘成文件（例如 `.wb-exec/tasks/001.json`），再派发。不要把任务包塞进命令行参数。
+Write the package to a file first (for example `.wb-exec/tasks/001.json`), then dispatch. Never stuff the package into command-line arguments.
 
-## 2. 派发
+## 2. Dispatch
 
-长任务（多半是长任务）用后台：
+Long jobs — most of them — go to the background:
 
 ```
 python <SKILL_DIR>/scripts/wb_exec.py dispatch --task .wb-exec/tasks/001.json --cwd <repo>
 ```
 
-短任务可以前台一次拿结果：
+Short jobs can be waited on in the foreground:
 
 ```
 python <SKILL_DIR>/scripts/wb_exec.py run --task .wb-exec/tasks/001.json --cwd <repo> --timeout 600
 ```
 
-常用开关：
-- `--dry-run`：只打印将要执行的 argv，用于确认路径与参数，不发起调用。
-- `--worktree off`：关闭隔离（仅当目录不是 Git 仓库，或你明确接受原地改动）。
-- `--timeout`：秒，默认 1800。
+Common flags:
+- `--dry-run`: print the argv that would run, to confirm paths and flags; starts nothing.
+- `--worktree off`: disable isolation (only when the directory is not a Git repository, or when you explicitly accept in-place changes).
+- `--timeout`: seconds, default 1800.
 
-**执行体是固定的**：WorkBuddy / DeepSeek V4.1 Flash，推理档位 极致（`max`）。脚本已写死在参数里，不提供 `--model` 或 `--effort`，不需要也不允许另行指定。账号或套餐侧拒绝该模型时直接失败，**不要换别的模型重试**——把 `stderr.log` 报给用户。
+**The executor is fixed**: WorkBuddy / DeepSeek V4.1 Flash at effort `max`. The script hard-codes it and exposes no `--model` or `--effort`; do not try to specify either. When the account or plan refuses that model the run fails — **do not retry with another model**. Report `stderr.log` to the user.
 
-## 3. 监督
+## 3. Supervise
 
 ```
 python <SKILL_DIR>/scripts/wb_exec.py status --job <JOB_ID>
 ```
 
-- `running`：正常，隔 30–60 秒再看，不要秒级轮询。
-- `stalled`：心跳超过 90 秒。先 `collect` 看它停在哪里，再决定 `cancel` 后重派（缩小任务包）还是换档重跑。
-- `cancel_requested`：取消请求已写入，等待进程退出。
+- `running`: normal. Look again in 30–60 seconds; never poll per second.
+- `stalled`: the heartbeat is older than 90 seconds. `collect` first to see where it stopped, then decide whether to `cancel` and re-dispatch a smaller package, or re-run at another effort tier.
+- `cancel_requested`: the cancellation flag is written; waiting for the process to exit.
 
-取消：
+Cancel:
 
 ```
 python <SKILL_DIR>/scripts/wb_exec.py cancel --job <JOB_ID>
 ```
 
-## 4. 回收与审查
+## 4. Collect and review
 
 ```
 python <SKILL_DIR>/scripts/wb_exec.py collect --job <JOB_ID> --wait
 ```
 
-返回结构（节选）：
+Result shape (excerpt):
 
 ```json
 {
   "ok": true,
   "status": "done",
   "result": {
-    "summary": "新增 token 校验中间件并补了 3 个用例",
+    "summary": "Added token validation middleware and 3 tests",
     "changed_files": ["src/auth/mw.py", "tests/test_mw.py"],
     "tests": [{"cmd": "pytest -q tests/test_mw.py", "status": "pass"}],
     "blockers": []
@@ -95,28 +95,28 @@ python <SKILL_DIR>/scripts/wb_exec.py collect --job <JOB_ID> --wait
 }
 ```
 
-审查纪律：
+Review discipline:
 
-1. **必须自己读 patch 再判断**：`artifacts.patch` 是真实 diff，`summary` 只是执行体的自述。两者不一致时以 diff 为准。
-2. `violations` 非空 = 执行体越界改了不属于它的文件。不要默默接受，也不要自行还原，先报给用户。
-3. `tests` 里的 "pass" 不是独立验证。整合后你在主工作区自己跑一遍验收命令。
-4. 整合由你做：`git apply --check` → `git apply` → 跑验收 → 汇报。不要执行 `git commit`/`push`，那要用户明确要求。
+1. **Read the patch yourself before judging.** `artifacts.patch` is the real diff; `summary` is only the executor's own account. When they disagree, the diff wins.
+2. A non-empty `violations` means the executor wrote files outside its assignment. Do not quietly accept it and do not revert it yourself — report it to the user first.
+3. A `pass` inside `tests` is not independent verification. After integrating, run the acceptance commands yourself in the main working tree.
+4. Integration is yours: `git apply --check` → `git apply` → run acceptance → report. Do not run `git commit` or `git push`; that requires an explicit request from the user.
 
-## 5. 边界（违反会造成事故）
+## 5. Boundaries (violating them causes incidents)
 
-- **不要递归**：执行体已被禁止派发；你自己也不要在 worker 运行期间再派发一个改同一批文件的任务。
-- **不要在 WorkBuddy/CodeBuddy 会话内部触发 dispatch**：子进程会与主会话的守护进程撞车，表现为零输出静默挂起（实测 45–300 秒无任何 stdout/stderr）。必须在 Kimi Code 或普通终端里调用本脚本。
-- **不要并行改同一文件**：多个 job 的 `owned_paths` 不得重叠，重叠就串行。
-- **不要回传全量日志**给用户：只给 `summary` + 关键 `tests` + `violations`。日志留在 `artifacts` 路径里按需查看。
-- **不要用 `-y` 手工重跑**：脚本已处理权限参数；绕过脚本等于绕过隔离与越界检查。
-- **不要替用户清理 worktree**：`collect` 后目录保留在原处供复核，清理是用户的决定。
+- **Never recurse**: the executor is already forbidden to dispatch, and you must not dispatch a second task over the same files while a worker is running.
+- **Never trigger `dispatch` from inside a WorkBuddy / CodeBuddy session**: the child process collides with that session's daemon and hangs with zero output — measured at 45–300 seconds with no stdout or stderr at all. Call this script from the host agent or a normal terminal.
+- **Never modify the same file in parallel**: the `owned_paths` of concurrent jobs must not overlap; overlapping work is serialised.
+- **Never return full logs to the user**: give `summary`, the relevant `tests` and `violations`. The logs stay in the `artifacts` paths for on-demand reading.
+- **Never re-run by hand with `-y`**: the script already handles the permission flags; bypassing the script bypasses isolation and the out-of-scope check.
+- **Never clean up the user's worktree**: after `collect` the directory stays in place for review, and removal is the user's decision.
 
-## 失败处理
+## Failure handling
 
-| 现象 | 处置 |
+| Symptom | Action |
 |---|---|
-| `exit_code != 0` 且 `blockers` 有内容 | 把 blocker 原样带回规划，缩小或拆分任务包后重派一次 |
-| `ok=false, blockers=["无法解析结构化结论"]` | 读 `artifacts.stdout` 尾巴，多为执行体没按 schema 输出；在任务包 `notes` 里加一句"最后一条消息必须是 JSON" |
-| `status=timeout` | 任务包太大。拆成 2–3 个 `owned_paths` 不重叠的子包 |
-| `status=stalled` | 先 collect，再 cancel；换 `--worktree auto` 重派 |
-| `cli_error` | 停下报给用户，不要安装依赖 |
+| `exit_code != 0` with a non-empty `blockers` | Carry the blocker back into planning unchanged, narrow or split the package, re-dispatch once |
+| `ok=false, blockers=["could not parse structured result"]` | Read the tail of `artifacts.stdout`; usually the executor did not follow the schema. Add "the last message must be JSON" to the package `notes` |
+| `status=timeout` | The package is too large. Split it into 2–3 packages whose `owned_paths` do not overlap |
+| `status=stalled` | `collect`, then `cancel`; re-dispatch with `--worktree auto` |
+| `cli_error` | Stop and report to the user; do not install dependencies |

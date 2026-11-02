@@ -1,0 +1,30 @@
+{
+  "size": [10, 3.9],
+  "canvas": [20, 7.8],
+  "panels": [
+    { "x": 0.4, "y": 1.2, "w": 9.2, "h": 5.2, "label": "Repository view" },
+    { "x": 10.4, "y": 1.2, "w": 9.2, "h": 5.2, "label": "Guardrails" }
+  ],
+  "nodes": [
+    { "id": "r1", "x": 0.8, "y": 5.0, "w": 4.2, "h": 0.9, "label": "HEAD at dispatch", "kind": "input" },
+    { "id": "r2", "x": 0.8, "y": 3.6, "w": 4.2, "h": 1.0, "label": "worktree wt/\n(wb-exec/<id8>)", "kind": "state" },
+    { "id": "g0", "x": 10.8, "y": 5.0, "w": 4.2, "h": 0.9, "label": "owned_paths whitelist", "kind": "task" },
+    { "id": "g1", "x": 10.8, "y": 3.6, "w": 4.2, "h": 0.9, "label": "inside whitelist", "kind": "q" },
+    { "id": "g2", "x": 10.8, "y": 2.2, "w": 4.2, "h": 0.9, "label": "outside whitelist", "kind": "noise" },
+    { "id": "g3", "x": 15.5, "y": 3.6, "w": 3.9, "h": 0.9, "label": "changed_files_git", "kind": "output" },
+    { "id": "g4", "x": 15.5, "y": 2.2, "w": 3.9, "h": 0.9, "label": "violations", "kind": "noise" },
+    { "id": "g5", "x": 10.8, "y": 1.45, "w": 8.6, "h": 0.65, "label": "no commit, no push, no auto-merge", "kind": "control", "icon": "stop" }
+  ],
+  "edges": [
+    { "source": "r1", "target": "r2", "points": [[2.9, 5.0], [2.9, 4.6]], "label": "branch", "label_at": [4.0, 4.8] },
+    { "source": "r2", "target": "g1", "points": [[5.0, 3.95], [9.6, 3.95], [9.6, 4.05], [10.8, 4.05]], "label": "each changed path", "label_at": [7.4, 4.4] },
+    { "source": "g0", "target": "g1", "points": [[12.9, 5.0], [12.9, 4.5]], "label": "allowed set", "label_at": [14.1, 4.75] },
+    { "source": "g0", "target": "g2", "points": [[10.8, 5.45], [10.3, 5.45], [10.3, 2.65], [10.8, 2.65]], "label": "same set", "label_at": [10.3, 5.85] },
+    { "source": "g1", "target": "g3" },
+    { "source": "g2", "target": "g4" }
+  ],
+  "annotations": [
+    { "x": 0.8, "y": 2.75, "text": "from HEAD only, no user changes", "font_size": 8 },
+    { "x": 10.8, "y": 1.05, "text": "reported, never auto-reverted", "font_size": 8 }
+  ]
+}
