@@ -6,7 +6,7 @@ this repository; if you change the code, change the numbers in here too.
 Canonical links to reuse:
 
 - Repo: <https://github.com/Luminousyyh/skill-wb-exec>
-- Release: <https://github.com/Luminousyyh/skill-wb-exec/releases/tag/v1.1.0>
+- Release: <https://github.com/Luminousyyh/skill-wb-exec/releases/tag/v1.2.1>
 - Figure 1: <https://raw.githubusercontent.com/Luminousyyh/skill-wb-exec/main/docs/figures/fig1-architecture.png>
 - Figure 4: <https://raw.githubusercontent.com/Luminousyyh/skill-wb-exec/main/docs/figures/fig4-isolation.png>
 
@@ -206,7 +206,7 @@ byte-identical across a refactor.)
 ## 发布前检查
 
 - [ ] 仓库是公开的，README 第一屏能看懂是做什么的
-- [ ] Release v1.1.0 存在且安装命令可用
+- [ ] Release v1.2.1 存在且安装命令可用
 - [ ] 四张图在 README 里能正常渲染
-- [ ] 描述里的数字与代码一致（12 个测试、5 个后端、379 KB 包）
+- [ ] 描述里的数字与代码一致（36 个测试、5 个后端、400 KB 包）
 - [ ] 不要在任何平台写"求 star"

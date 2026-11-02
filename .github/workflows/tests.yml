@@ -1,0 +1,48 @@
+name: tests
+
+# The suite stubs the executor CLI, so it needs neither WorkBuddy nor a model
+# call. That is the whole reason it can run here on every push.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: py${{ matrix.python }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The lock code has a Windows path-separator branch and the end-to-end
+        # tests drive real `git`, so both platforms are load-bearing rather
+        # than decorative.
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Run the suite (offline, stubbed executor)
+        run: python -m unittest discover -s skills/wb-exec/tests -v
+
+      - name: Package must not ship bytecode caches
+        # A previous release grew from 66 KB to 456 KB because `files[]` in
+        # package.json overrides the root .npmignore and `__pycache__` slipped
+        # in. This asserts the regression stays fixed.
+        shell: bash
+        run: |
+          set -o pipefail
+          npm pack --dry-run 2>&1 | tee "$RUNNER_TEMP/pack.log"
+          if grep -q "__pycache__\|\.pyc" "$RUNNER_TEMP/pack.log"; then
+            echo "::error::bytecode caches leaked into the package"
+            exit 1
+          fi

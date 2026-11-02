@@ -308,7 +308,7 @@ Exit codes:
 
 ## What it deliberately does not do
 
-Ten features were considered and dropped on purpose; the reasoning is in
+Eleven features were considered and dropped on purpose; the reasoning is in
 [rejected-designs.md](skills/wb-exec/references/rejected-designs.md). The short
 version:
 
@@ -325,19 +325,24 @@ version:
 ## State directory layout
 
 ```
-~/.wb-exec/jobs/<job_id>/
-  job.json        task package snapshot, actual argv, cwd, worktree, timeout
-  heartbeat.json  updated by the supervisor every 5 seconds
-  stdout.jsonl    raw executor output (stream-json)
-  stderr.log      executor log; model and permission errors usually land here
-  change.patch    the real diff (Git repository with isolation enabled)
-  result.json     parsed structured result
-  exit.json       state, exit code, elapsed time
-  cancel.request  cancellation flag
-  wt/             the dedicated worktree (--worktree auto on a Git repository)
+~/.wb-exec/
+  dispatch.lock   claims of every running job: job_id, owned_paths, pid, since
+  dispatch.guard  transient mutex held only while dispatch.lock is rewritten
+  jobs/<job_id>/
+    job.json        task package snapshot, actual argv, cwd, worktree, timeout
+    heartbeat.json  updated by the supervisor every 5 seconds
+    stdout.jsonl    raw executor output (stream-json)
+    stderr.log      executor log; model and permission errors usually land here
+    change.patch    the real diff (Git repository with isolation enabled)
+    result.json     parsed structured result
+    exit.json       state, exit code, elapsed time
+    cancel.request  cancellation flag
+    wt/             the dedicated worktree (--worktree auto on a Git repository)
 ```
 
 Override the state root with the `WB_EXEC_HOME` environment variable.
+
+`dispatch.lock` is advisory between cooperating jobs and scoped to a single `WB_EXEC_HOME`. It is **not** a security boundary: a process that ignores it is not stopped by it.
 
 **Isolation semantics**: `--worktree auto` (default) on a Git repository creates a `wb-exec/<id8>` branch and a `wt/` worktree from the `HEAD` at dispatch time. Nothing is committed, pushed or auto-merged, and the user's uncommitted changes are **not** carried over. Removing the worktree is the user's decision; the script never deletes it.
 
@@ -374,14 +379,22 @@ skill-wb-exec/
 │       ├── assets/
 │       │   └── task.example.json     # task package template
 │       ├── references/
-│       │   └── protocol.md           # fields, result shape, state machine, isolation, exit codes
+│       │   ├── protocol.md           # fields, result shape, state machine, isolation, exit codes
+│       │   └── rejected-designs.md   # 11 features considered and dropped, with reasons
 │       ├── scripts/
 │       │   └── wb_exec.py            # every subcommand (standard library only)
 │       └── tests/
-│           ├── fake_cli.py           # stubbed CLI
-│           └── test_wb_exec.py       # unit tests
+│           ├── fake_cli.py                   # stubbed CLI, replays a stream-json transcript
+│           ├── test_wb_exec.py               # unit tests
+│           ├── test_executor_backends.py     # backend registry, argv pinning
+│           ├── test_end_to_end.py            # dispatch -> status -> collect, against a real repo
+│           └── test_lock_and_needs_human.py  # lock claims, pruning, needs_human derivation
 ├── docs/
-│   └── figures/               # figure sources (JSON) and rendered SVG/PDF/PNG
+│   ├── figures/               # figure sources (JSON) and rendered SVG/PDF/PNG
+│   └── launch-drafts.md       # ready-to-post copy per channel, with its own fact-check
+├── assets/
+│   └── icon.png               # plugin-market storefront icon
+├── screenshots.json           # market screenshot manifest
 ├── LICENSE                    # MIT
 └── README.md
 ```
