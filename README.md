@@ -2,7 +2,9 @@
 
 > 把边界明确的实现类任务外包给另一个 CLI 智能体执行，主控只做规划、监督与审查。
 
-`wb-exec` 是一个 Agent Skill（技能包）。它让主控 Agent 把**编码 / 重构 / 补测**这类子任务派发给 **WorkBuddy 无头执行体（DeepSeek V4.1 Flash，推理档位 极致）**，跑完回收**结构化结论**与**真实 diff**。
+`wb-exec` 是一个 **DeepSeek Harness 插件（skill bundle）**：主控 Agent 把**编码 / 重构 / 补测**这类子任务派发给 **WorkBuddy 无头执行体（DeepSeek V4.1 Flash，推理档位 极致）**，跑完回收**结构化结论**与**真实 diff**。
+
+> ⚠️ **前提**：同一台机器上必须装有 WorkBuddy / CodeBuddy CLI。没有它，插件能装上，但技能实际用不了——`doctor` 会如实报 `ok=false` 并停下，不会自行安装依赖或改配置。
 
 适用场景：
 
@@ -54,7 +56,7 @@
 先跑自检确认环境：
 
 ```bash
-python scripts/wb_exec.py doctor
+python <SKILL_DIR>/scripts/wb_exec.py doctor
 ```
 
 返回 JSON：`ok` / `cli` / `cli_version` / `git` / `is_git_repo` / `state_root`。`ok=false` 或 `cli_error` 非空时，停下来把原文交给用户，不要自行安装依赖或改配置。
@@ -63,15 +65,28 @@ python scripts/wb_exec.py doctor
 
 ## 安装
 
-把本目录放到你的 Agent 的 skills 目录下，Agent 会读取 `SKILL.md` 的 frontmatter 注册本技能：
+本项目是 **DSH 插件包**（`package.json` 声明 `dsh.bundle`），安装后由 `ctx.skills` provider 把 `skills/wb-exec/` 发布成技能。
+
+**方式一：走插件市场 / CLI（推荐）**
+
+在 DSH Desktop 的 **Plugins → Plugin Market** 里搜索安装，或在命令行：
 
 ```bash
-git clone https://github.com/Luminousyyh/skill-wb-exec.git ~/.agents/skills/wb-exec
+dsh plugin --profile <profile> add github:Luminousyyh/skill-wb-exec
 ```
 
-> 本机示例路径为 `~/.agents/skills/wb-exec`；不同 Agent 的 skills 目录可能不同，请按你的 Agent 约定放置。
+> DSH Desktop 的 profile 由桌面应用自己管理，命令行安装可能装到 `profiles/web` 而非桌面应用使用的 profile；桌面端请在 **Settings → Plugins** 里安装。
 
-命令统一使用 **本 Skill 的绝对路径**，不要依赖终端当前目录：
+**方式二：当普通 skill 用（不走插件）**
+
+复制 `skills/wb-exec/` 到你的 Agent 的 skills 目录即可（加载器按 `<skills-root>/<name>/SKILL.md` 发现技能）：
+
+```bash
+git clone https://github.com/Luminousyyh/skill-wb-exec.git
+cp -r skill-wb-exec/skills/wb-exec ~/.agents/skills/wb-exec
+```
+
+调用脚本统一使用 **本 Skill 的绝对路径**，不要依赖终端当前目录：
 
 ```bash
 python <SKILL_DIR>/scripts/wb_exec.py <子命令> ...
@@ -276,9 +291,9 @@ python <SKILL_DIR>/scripts/wb_exec.py collect --job <JOB_ID> --wait
 测试用假 CLI 打桩，**不需要安装 WorkBuddy 即可离线运行**：
 
 ```bash
-python -m unittest discover -s tests -v
+python -m unittest discover -s skills/wb-exec/tests -v
 # 或
-python tests/test_wb_exec.py
+python skills/wb-exec/tests/test_wb_exec.py
 ```
 
 覆盖点：WorkBuddy 环境变量注入、独立 CLI 入口优先于内嵌入口、原生错误结果不被误报为成功、纯文本回复不算结构化成功。
@@ -286,21 +301,29 @@ python tests/test_wb_exec.py
 ## 项目结构
 
 ```
-wb-exec/
-├── SKILL.md                  # Skill 主说明：自检、任务包、派发、监督、回收、边界
-├── assets/
-│   └── task.example.json     # 任务包模板
-├── references/
-│   └── protocol.md           # 任务包字段、结果结构、状态机、隔离与退出码
-├── scripts/
-│   └── wb_exec.py            # 全部子命令实现（仅标准库）
-└── tests/
-    ├── fake_cli.py           # 打桩用的假 CLI
-    └── test_wb_exec.py       # 单元测试
+skill-wb-exec/
+├── package.json               # 插件包清单：dsh.bundle.patch → dsh/cordis.patch.yml
+├── dsh/
+│   ├── index.js               # 服务端入口：把 skills/wb-exec/ 发布到 ctx.skills（纯 ESM，无构建）
+│   └── cordis.patch.yml       # 向 profile 插件树 insert 一行（按包名解析，不写相对路径）
+├── skills/
+│   └── wb-exec/
+│       ├── SKILL.md           # Skill 主说明：自检、任务包、派发、监督、回收、边界
+│       ├── assets/
+│       │   └── task.example.json     # 任务包模板
+│       ├── references/
+│       │   └── protocol.md           # 任务包字段、结果结构、状态机、隔离与退出码
+│       ├── scripts/
+│       │   └── wb_exec.py            # 全部子命令实现（仅标准库）
+│       └── tests/
+│           ├── fake_cli.py           # 打桩用的假 CLI
+│           └── test_wb_exec.py       # 单元测试
+├── LICENSE                    # MIT
+└── README.md
 ```
 
 ---
 
 ## License
 
-本项目**尚未指定开源许可证**。在明确选择许可证之前，默认保留所有权利（all rights reserved）。如需他人可自由使用，建议补充 MIT 或 Apache-2.0。
+MIT — 见 [LICENSE](LICENSE)。

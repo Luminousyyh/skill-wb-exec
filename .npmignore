@@ -1,0 +1,7 @@
+node_modules/
+.wb-exec/
+__pycache__/
+**/__pycache__/
+*.pyc
+**/*.pyc
+*.tgz

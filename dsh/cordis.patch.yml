@@ -1,0 +1,14 @@
+# The layer this bundle contributes to a dsh profile that lists it.
+#
+# One row: a skill provider that publishes the packaged `skills/wb-exec/` tree
+# on `ctx.skills`. The row references the package by NAME rather than by a
+# relative path so Node resolution finds the installed copy.
+#
+# The skill is the whole product: no MCP server and nothing to configure at
+# install time. The machine must have the WorkBuddy / CodeBuddy CLI available
+# for the skill to do anything; `doctor` reports that and the skill stops
+# rather than guessing.
+
+- insert:
+    - id: wb-exec-skill
+      name: wb-exec-dsh
