@@ -30,7 +30,7 @@
 
 ![图 1　整体结构](figures/fig1-architecture.png)
 
-*图 1　整体结构。上排是安装链路：`package.json` 声明 `dsh.bundle`，装载器据此把 `entry + skill files` 挂到宿主的技能表上。右上是运行链路：`dispatch` 派生出一个 CLI 执行体，执行体只在 `worktree wt/` 里改文件，并受 `owned_paths` 白名单约束。下排自右向左是审计链路：心跳、真实 git diff、越界清单回流到审查门，由人决定合入还是重新拆一个更小的任务包。*
+*图 1　整体结构。上排是安装链路：`package.json` 声明 `dsh.bundle`，装载器据此把 `entry + skill files` 挂到宿主的技能表上。右上是运行链路：`dispatch` **先领走 `dispatch.lock` 里的路径（claim first），再**派生一个 CLI 执行体；执行体只在 `worktree wt/` 里改文件，并受 `owned_paths` 白名单约束。下排自右向左是审计链路：心跳、真实 git diff、越界清单、以及 `needs_human`，一并回流到审查门，由人决定合入还是重新拆一个更小的任务包。*
 
 ```
 宿主 Agent（规划 + 审查）
@@ -109,6 +109,8 @@ proc = git(["worktree", "add", "-b", branch, str(wt), "HEAD"], repo)
 ![图 3　隔离与越界检查](figures/fig4-isolation.png)
 
 *图 3　隔离与越界检查。左边：worktree 从**派发时刻的 HEAD** 建出，所以未提交改动不会跟着进去——"from HEAD only, no user changes" 这一句是整个隔离性质的前提。右边：每个被改动的路径都要过白名单这一关，界内的进 `changed_files_git`，界外的进 `violations`；界外的处理是**报告**，不是自动回滚（"reported, never auto-reverted"）。最下面一行是三条硬约束：不 commit、不 push、不自动合入。*
+
+*注意这张图画的是**白名单非空**的情形。`owned_paths` 为空时 `violations()` 会在第一行直接返回 `[]`，这一关根本不执行——这正是缺陷 1。*
 
 ### 3.3 真实 diff，而不是摘要
 
@@ -189,7 +191,7 @@ return {"required": bool(reasons), "reasons": reasons}
 | 测试数 | **36**（+3 subtests） | 全程离线，不调用模型 |
 | 测试耗时 | ~7 s | |
 | 代码行数 | **1092** 行 | 纯标准库，Python 3.10+ |
-| 打包体积 | **400.0 kB** / 33 文件 | 大头是 4 张矢量图的 PNG |
+| 打包体积 | **413.1 kB** / 33 文件 | 大头是 4 张矢量图的 PNG |
 | 执行体后端 | **5** | workbuddy（默认）/ codex / claude / aider / custom |
 | 默认超时 | 1800 s | 心跳每 5 s 写一次，90 s 无心跳判 `stalled` |
 | 退出码 | 0 / 1 / 3 / 4 | 见下文缺陷 2 |

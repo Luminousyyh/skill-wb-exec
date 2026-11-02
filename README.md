@@ -292,7 +292,7 @@ Exit codes:
 
 ![Figure 4](docs/figures/fig4-isolation.png)
 
-*Figure 4. The whitelist and the worktree are the security boundary — not a polite request inside a prompt.*
+*Figure 4. The whitelist and the worktree are enforced in code rather than requested in the prompt, and out-of-scope writes are reported instead of auto-reverted. This is isolation, not confinement: a process that ignores the boundary is not stopped by it.*
 
 - **Directory isolation and `owned_paths` are the real security boundary, not optional extras.** The child command includes `-y`, which skips routine permission prompts (HIGH/CRITICAL cases may still ask), so isolation plus a whitelist is what actually constrains the run
 - **Never recurse**: the executor is already forbidden to dispatch. The dispatch lock also refuses a second job whose paths overlap a running one, so the old "do not do this" convention is now enforced rather than remembered
