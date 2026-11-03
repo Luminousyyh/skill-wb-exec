@@ -18,7 +18,7 @@
 | `goal` | yes | The objective, without implementation steps. The script renders it into the executor prompt |
 | `context` | no | Background and known constraints |
 | `inputs` | no | Read-only reference material; paths are passed to the executor with `--add-dir` |
-| `owned_paths` | no | **Whitelist of writable paths.** When empty the executor may only create new files. Always use `/` as the path separator |
+| `owned_paths` | no | **Whitelist of writable paths.** When empty the executor may only create new files; edits and deletions of existing files are reported in `violations`. Always use `/` as the path separator. Entries are normalised against `--cwd`: a path that escapes it is rejected, and the repository root itself is refused |
 | `acceptance` | no | Executable commands; the executor should run them and record the outcome in `tests` |
 | `notes` | no | Catch-all constraints |
 
@@ -49,7 +49,7 @@
 
 - `ok` = status is `done` **and** the structured result was parsed. `ok=true` does not mean the code is correct; the host still has to read the patch and run acceptance.
 - `changed_files` comes from the executor's own account; `changed_files_git` comes from the real `git diff`. Trust `changed_files_git`.
-- `violations` is **always present** — `[]` on a clean run. It can only be non-empty when `owned_paths` was supplied, because without a whitelist there is nothing to violate.
+- `violations` is **always present** — `[]` on a clean run. An empty `owned_paths` still permits **additions only**: a run that modifies or deletes an existing file is reported there, because "new files only" is enforced rather than assumed.
 - `needs_human` is **always present**: `{"required": bool, "reasons": [...]}`. Reasons are `timeout`, `cancelled`, `failed`, `out_of_scope_writes`, `blocked`, `failing_tests`. It is derived from structured fields only — never from the wording of `summary`. Route on it; do not re-derive it from prose.
 - `isolated` on the collect envelope says whether a worktree was actually used. When it is `false`, no diff was captured at all, so an empty `changed_files_git` means "unknown", not "nothing changed".
 
@@ -102,14 +102,18 @@ Each job's `stdout.jsonl` plus `stderr.log` is capped at 64 MiB by default (`WB_
 ## Isolation semantics
 
 - `--worktree auto` (default) on a Git repository: create a `wb-exec/<id8>` branch and a `wt/` worktree from the `HEAD` at dispatch time. **No commit, no push, no auto-merge**, and the user's uncommitted changes are not carried over.
+- If the worktree cannot be created, the dispatch **aborts**. It never falls back to editing the source tree in place: a silent fallback would turn an isolation guarantee into no isolation at all.
 - Non-Git repository: in-place execution, `isolated=false`, no diff capture. `owned_paths` is then the only defence and must be written.
 - Removing the worktree is the user's decision; the script never deletes it.
+- Changed paths are read with `-z`, so names containing spaces, quotes or non-ASCII characters survive intact instead of arriving git-quoted.
 
 ## Recursion and permissions
 
 - The child environment always carries `WB_SUBAGENT=1` and `CROSS_CLI_COLLAB_WORKER=1`; when the script sees `WB_SUBAGENT` it refuses to dispatch with exit code 3.
-- The actual child command includes `-p --output-format stream-json --json-schema <schema> -y --allowedTools Read,Write,Edit,Glob,Grep,Bash --add-dir <cwd> --session-id <uuid>`.
-- `-y` skips routine permission prompts (HIGH/CRITICAL cases may still ask), which is why **directory isolation and `owned_paths` are the real security boundary** rather than optional extras.
+- On the `workbuddy` backend the child command is `-p --output-format stream-json --json-schema <schema> -y --permission-mode bypassPermissions --allowedTools Read,Write,Edit,Glob,Grep,Bash --add-dir <cwd> --session-id <uuid>`, with the prompt delivered on **stdin** (`-p` reads it from there). A multi-line argv prompt is truncated to its first line by this CLI, and every task package is multi-line.
+- `-y` alone skips routine permission prompts but still leaves HIGH/CRITICAL to ask, and a non-interactive run has no prompt to answer — hence `--permission-mode`. Directory isolation and `owned_paths` remain the real security boundary rather than optional extras.
+- The CLI is probed **before** any claim is taken, so a missing or unusable executor leaves no live lock behind. An explicit `WB_CLI` is authoritative: if it is broken the run fails rather than silently using another installation.
+- A failure inside dispatch or the supervisor still writes `exit.json` and `result.json`, so the job is collectable as `failed` instead of disappearing.
 
 ## Exit codes
 

@@ -70,9 +70,8 @@ class CliNotFound(RuntimeError):
 # ---------------------------------------------------------------------------
 # 执行体后端
 # ---------------------------------------------------------------------------
-# 每个后端只描述"怎么把一次任务变成一个 argv 调用"，其余流程（隔离、
-# 心跳、结构化回收、越界检查）完全不区分后端。workbuddy 是默认值，
-# 行为与旧版逐字节一致；其余后端为可选，需要用户自己指向可执行文件。
+# 执行体后端。workbuddy 是默认且模型固定；其余后端使用各自 CLI 的配置。
+# 主控模型与思考强度始终继承用户当前会话，本脚本不读取也不改写它们。
 
 EXECUTOR_BACKENDS = ("workbuddy", "codex", "claude", "aider", "custom")
 DEFAULT_EXECUTOR = "workbuddy"
@@ -82,20 +81,38 @@ def _backend_env() -> str:
     return (os.environ.get("WB_EXECUTOR") or DEFAULT_EXECUTOR).strip().lower()
 
 
-def _custom_argv_template() -> list[str]:
-    """WB_CLI 已经承担自定义入口；这里只读 WB_CLI_ARGV 作为额外参数模板。
+def _candidate_entries_for(backend: str) -> list[list[str]]:
+    """workbuddy 之外的入口探测：只认 WB_CLI，再从 PATH 猜常见名字。
 
-    模板中的占位符在组装 argv 时展开：
-      {prompt} {cwd} {schema} {session} {model} {effort}
+    这些 CLI 的参数形态差异很大，所以只负责"找到可执行文件"，
+    真正的参数拼装交给 build_executor_argv()。
     """
-    raw = os.environ.get("WB_CLI_ARGV")
-    if not raw:
-        return []
-    try:
-        parsed = json.loads(raw)
-    except Exception:  # noqa: BLE001
-        return []
-    return [str(x) for x in parsed] if isinstance(parsed, list) else []
+    cands: list[list[str]] = []
+    override = os.environ.get("WB_CLI")
+    if override:
+        raw = override.strip()
+        if raw.startswith("["):
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list) and parsed:
+                    cands.append([str(x) for x in parsed])
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            cands.append([raw])
+    for name in {
+        "codex": ("codex",),
+        "claude": ("claude", "claude-code"),
+        "aider": ("aider",),
+        "custom": (),
+    }.get(backend, ()):
+        found = shutil.which(name)
+        if found:
+            cands.append([found])
+    return cands
+
+
+
 
 
 def _utf8_stdout() -> None:
@@ -119,12 +136,13 @@ def _candidate_entries() -> list[list[str]]:
         if raw.startswith("["):
             try:
                 parsed = json.loads(raw)
-                if isinstance(parsed, list) and parsed:
-                    cands.append([str(x) for x in parsed])
-            except Exception:  # noqa: BLE001
-                pass
-        else:
-            cands.append([raw])
+            except (ValueError, TypeError) as exc:
+                raise CliNotFound("WB_CLI 必须是入口路径或非空 JSON 字符串数组") from exc
+            if not isinstance(parsed, list) or not parsed or not all(
+                    isinstance(part, str) and part for part in parsed):
+                raise CliNotFound("WB_CLI 必须是入口路径或非空 JSON 字符串数组")
+            return [parsed]
+        return [[raw]]
 
     node_cands = []
     for name in ("node", "node.exe"):
@@ -168,60 +186,34 @@ def _candidate_entries() -> list[list[str]]:
 
 
 def find_cli(backend: str = DEFAULT_EXECUTOR) -> list[str]:
-    candidates = _candidate_entries() if backend == "workbuddy" else _candidate_entries_for(backend)
+    candidates = (_candidate_entries() if backend == DEFAULT_EXECUTOR
+                  else _candidate_entries_for(backend))
+    # An explicit entry is authoritative, including when it is broken: silently
+    # falling back to a different installation would run the task with an
+    # executor the caller did not ask for.
+    if os.environ.get("WB_CLI"):
+        candidates = candidates[:1]
     for cand in candidates:
         try:
             probe = subprocess.run(
-                cand + ["--version"],
-                capture_output=True,
-                timeout=60,
+                cand + ["--version"], capture_output=True, timeout=30,
                 env={**os.environ, "CI": "1"},
             )
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
             continue
-        text = (probe.stdout or b"").decode("utf-8", "replace")
-        if probe.returncode == 0 and any(ch.isdigit() for ch in text):
+        output = (probe.stdout or b"").decode("utf-8", "replace")
+        if probe.returncode == 0 and any(ch.isdigit() for ch in output):
             return cand
-    if backend == "workbuddy":
+    if backend == DEFAULT_EXECUTOR:
         raise CliNotFound(
-            "找不到可用的 WorkBuddy CLI。请设置 WB_CLI 指向 codebuddy 入口，"
-            "或确认 WorkBuddy 已安装且 CLI 可用。"
-        )
+            "找不到可用的 WorkBuddy CLI。请检查 WB_CLI 指向的 codebuddy 入口，"
+            "或确认 WorkBuddy 已安装且 CLI 可用。")
     raise CliNotFound(
         f"找不到可用的 {backend} CLI。请设置 WB_CLI 指向它的可执行入口，"
-        f"或用 --executor workbuddy 回到默认执行体。"
-    )
+        f"或用 --executor workbuddy 回到默认执行体。")
 
 
-def _candidate_entries_for(backend: str) -> list[list[str]]:
-    """workbuddy 之外的入口探测：只认 WB_CLI，再从 PATH 猜常见名字。
 
-    这些 CLI 的参数形态差异很大，所以只负责"找到可执行文件"，
-    真正的参数拼装交给 build_executor_argv()。
-    """
-    cands: list[list[str]] = []
-    override = os.environ.get("WB_CLI")
-    if override:
-        raw = override.strip()
-        if raw.startswith("["):
-            try:
-                parsed = json.loads(raw)
-                if isinstance(parsed, list) and parsed:
-                    cands.append([str(x) for x in parsed])
-            except Exception:  # noqa: BLE001
-                pass
-        else:
-            cands.append([raw])
-    for name in {
-        "codex": ("codex",),
-        "claude": ("claude", "claude-code"),
-        "aider": ("aider",),
-        "custom": (),
-    }.get(backend, ()):
-        found = shutil.which(name)
-        if found:
-            cands.append([found])
-    return cands
 
 
 def _add_dir_paths(refs: list[str]) -> list[str]:
@@ -258,42 +250,22 @@ def build_executor_argv(backend: str, cli: list[str], prompt: str, run_cwd: Path
                         schema: str, refs: list[str]) -> list[str]:
     """按后端拼装 argv。
 
-    workbuddy 保持与旧版完全一致的参数序列，其余后端遵循各自 CLI 的
-    常见无头调用约定；custom 完全由 WB_CLI_ARGV 模板决定。
+    workbuddy 的参数序列单独维护（提示走 stdin、需要显式权限模式）；其余后端
+    遵循各自 CLI 的常见无头调用约定；custom 完全由 WB_CLI_ARGV 模板决定。
     """
     session = str(uuid.uuid4())
     if backend == "workbuddy":
-        # The prompt is NOT placed on the command line for this backend. It goes
-        # in on stdin, and `-p` acts as the "read the prompt from stdin" switch.
-        # Measured against codebuddy 2.174.0: a multi-line argv prompt is
-        # truncated to its first line ("Line one AAA.\nLine two BBB." arrives as
-        # "AAA."), while the same text piped on stdin arrives intact, and a long
-        # single-line argv prompt works fine. build_prompt() always returns
-        # multi-line text, so on argv this backend silently received an empty
-        # task body.
+        # Multi-line prompts travel on stdin: codebuddy 2.174.0 truncates argv
+        # prompts to their first line. Non-interactive tool writes need an
+        # explicit permission mode as well as -y.
         argv = cli + [
-            "-p",
-            "--output-format", "stream-json",
-            "--json-schema", schema,
-            "-y",
-            # `-y` is documented as "Bypass permission prompts (HIGH/CRITICAL
-            # still ask)", which is not enough on its own: in a non-interactive
-            # `-p` run there is no prompt to answer, so Write/Edit/Bash were
-            # refused and every task reported blockers without touching a file.
-            # --permission-mode is what actually opens the tools for this run.
-            # Measured: with it a write lands on disk; without it the executor
-            # returns "本会话被设置为只读" and changes nothing.
-            "--permission-mode", "bypassPermissions",
+            "-p", "--output-format", "stream-json", "--json-schema", schema,
+            "-y", "--permission-mode", "bypassPermissions",
             "--allowedTools", "Read,Write,Edit,Glob,Grep,Bash",
-            "--add-dir", str(run_cwd),
-            "--session-id", session,
+            "--add-dir", str(run_cwd), "--session-id", session,
         ]
-        # `--add-dir` takes directories, so file refs arrive here widened to
-        # their parent directory; see _add_dir_paths().
         for ref in _add_dir_paths(refs):
             argv.extend(["--add-dir", ref])
-        # 执行体固定为 WorkBuddy / DeepSeek V4.1 Flash，推理档位固定 极致(max)。
-        # 不提供其他模型或档位，也不做自动降级。
         argv.extend(["--model", EXECUTOR_MODEL, "--effort", EXECUTOR_EFFORT])
         return argv
 
@@ -317,26 +289,48 @@ def build_executor_argv(backend: str, cli: list[str], prompt: str, run_cwd: Path
         return argv
 
     if backend == "aider":
+        # aider reads named FILES, so refs are passed through as-is; widening
+        # them to directories would hand it --read a directory.
         argv = cli + ["--yes-always", "--no-auto-commits", "--message", prompt]
         for ref in refs:
             argv.extend(["--read", ref])
         return argv
 
-    # custom：模板里出现的占位符按本次作业展开。
-    substitutions = {
-        "{prompt}": prompt,
-        "{cwd}": str(run_cwd),
-        "{schema}": schema,
-        "{session}": session,
-        "{model}": EXECUTOR_MODEL,
-        "{effort}": EXECUTOR_EFFORT,
-    }
-    argv = list(cli)
-    for part in _custom_argv_template():
-        for key, value in substitutions.items():
-            part = part.replace(key, value)
-        argv.append(part)
-    return argv
+    if backend == "custom":
+        template = _custom_argv_template()
+        if not template:
+            raise CliNotFound(
+                "custom 后端需要 WB_CLI（入口）与 WB_CLI_ARGV（参数模板 JSON 数组）")
+        expanded = []
+        for part in template:
+            expanded.append(
+                part.replace("{prompt}", prompt)
+                    .replace("{cwd}", str(run_cwd))
+                    .replace("{schema}", schema)
+                    .replace("{session}", session)
+                    .replace("{model}", "")
+                    .replace("{effort}", ""))
+        return cli + expanded
+
+    raise CliNotFound(f"未知执行体后端：{backend}")
+
+
+def _custom_argv_template() -> list[str]:
+    """WB_CLI 已经承担自定义入口；这里只读 WB_CLI_ARGV 作为额外参数模板。
+
+    模板中的占位符在组装 argv 时展开：{prompt} {cwd} {schema} {session}
+    {model} {effort}。
+    """
+    raw = (os.environ.get("WB_CLI_ARGV") or "").strip()
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except Exception as exc:  # noqa: BLE001
+        raise CliNotFound("WB_CLI_ARGV 必须是 JSON 字符串数组") from exc
+    if not isinstance(parsed, list) or not all(isinstance(x, str) for x in parsed):
+        raise CliNotFound("WB_CLI_ARGV 必须是 JSON 字符串数组")
+    return parsed
 
 
 def cli_version(argv: list[str]) -> str:
@@ -356,18 +350,21 @@ def cli_version(argv: list[str]) -> str:
 # ---------------------------------------------------------------------------
 
 def load_task(path: Path) -> dict:
-    task = json.loads(path.read_text(encoding="utf-8"))
+    # Windows PowerShell's UTF8 encoding may prepend a BOM.
+    task = json.loads(path.read_text(encoding="utf-8-sig"))
     if not isinstance(task, dict):
-        raise SystemExit("任务包必须是 JSON 对象")
-    if not task.get("goal"):
-        raise SystemExit("任务包缺少 goal 字段")
-    task.setdefault("owned_paths", [])
-    task.setdefault("inputs", [])
-    task.setdefault("acceptance", [])
-    task.setdefault("context", "")
-    task.setdefault("notes", "")
-    if not isinstance(task["owned_paths"], list):
-        raise SystemExit("owned_paths 必须是数组")
+        raise ValueError("任务包必须是 JSON 对象")
+    if not isinstance(task.get("goal"), str) or not task["goal"].strip():
+        raise ValueError("任务包缺少非空 goal 字段")
+    for key in ("owned_paths", "inputs", "acceptance"):
+        task.setdefault(key, [])
+        if not isinstance(task[key], list) or not all(
+                isinstance(item, str) and item.strip() for item in task[key]):
+            raise ValueError(f"{key} 必须是非空字符串组成的数组")
+    for key in ("context", "notes"):
+        task.setdefault(key, "")
+        if not isinstance(task[key], str):
+            raise ValueError(f"{key} 必须是字符串")
     return task
 
 
@@ -470,44 +467,46 @@ def is_git_repo(path: Path) -> bool:
         return False
 
 
-def make_worktree(repo: Path, jd: Path, job_id: str) -> Path | None:
+def make_worktree(repo: Path, jd: Path, job_id: str) -> Path:
     wt = jd / "wt"
-    branch = f"wb-exec/{job_id[:8]}"
+    branch = f"wb-exec/{job_id}"
     proc = git(["worktree", "add", "-b", branch, str(wt), "HEAD"], repo)
     if proc.returncode != 0:
-        return None
+        raise RuntimeError("无法创建隔离 worktree：" + (proc.stderr or proc.stdout).strip())
     return wt
 
 
 def capture_diff(wt: Path, jd: Path) -> dict:
-    git(["add", "-A"], wt)
+    staged = git(["add", "-A"], wt)
+    if staged.returncode:
+        raise RuntimeError("git add 失败：" + staged.stderr.strip())
     diff = subprocess.run(
-        ["git", "diff", "--cached", "--binary"], cwd=str(wt),
-        capture_output=True,
+        ["git", "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv"],
+        cwd=str(wt), capture_output=True, check=True,
     )
     patch = jd / "change.patch"
-    patch.write_bytes(diff.stdout or b"")
-    names = subprocess.run(
-        ["git", "diff", "--cached", "--name-only"], cwd=str(wt),
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-    )
-    return {
-        "patch": str(patch),
-        "patch_bytes": len(diff.stdout or b""),
-        "changed": [n for n in names.stdout.splitlines() if n.strip()],
-    }
+    patch.write_bytes(diff.stdout)
+    # NUL-delimited paths preserve Chinese names, spaces and literal newlines.
+    names = git(["diff", "--cached", "--name-status", "--no-renames", "-z"], wt)
+    if names.returncode:
+        raise RuntimeError("git diff 失败：" + names.stderr.strip())
+    fields = names.stdout.rstrip("\0").split("\0") if names.stdout else []
+    changes = {fields[i + 1]: fields[i] for i in range(0, len(fields), 2)}
+    return {"patch": str(patch), "patch_bytes": len(diff.stdout),
+            "changed": list(changes), "changes": changes}
 
 
-def violations(changed: list[str], owned: list[str]) -> list[str]:
+def violations(changed: list[str], owned: list[str], changes: dict | None = None) -> list[str]:
     if not owned:
-        return []
-    patterns = [o.strip().rstrip("/") for o in owned if o.strip()]
-    bad = []
-    for name in changed:
-        name = name.replace("\\", "/")
-        if not any(name == p or name.startswith(p + "/") for p in patterns):
-            bad.append(name)
-    return bad
+        # An empty whitelist permits additions, never edits/deletions of existing files.
+        return [name for name in changed if (changes or {}).get(name) != "A"]
+    def normalize(value):
+        value = value.strip().replace("\\", "/").rstrip("/")
+        return value.casefold() if os.name == "nt" else value
+    patterns = [normalize(entry) for entry in owned if entry.strip()]
+    return [name for name in changed if not any(
+        normalize(name) == pattern or normalize(name).startswith(pattern + "/")
+        for pattern in patterns)]
 
 
 # ---------------------------------------------------------------------------
@@ -759,16 +758,30 @@ def _overlapping_jobs(owned_paths: list[str]) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def _monitor(job_id: str) -> int:
-    """Run one job, then always drop its path claim.
-
-    The claim is taken in _assemble, before the worktree exists, and has to
-    survive until the job is over — including the abnormal paths, otherwise a
-    crash would leave the paths locked until the heartbeat went stale.
-    """
     try:
         return _monitor_body(job_id)
+    except Exception as exc:
+        _record_failure(job_id, exc)
+        return 1
     finally:
         _release_claim(job_id)
+
+
+def _record_failure(job_id: str, error: Exception) -> None:
+    jd = job_dir(job_id)
+    jd.mkdir(parents=True, exist_ok=True)
+    message = f"执行失败: {type(error).__name__}: {error}"
+    err_path = jd / "stderr.log"
+    with err_path.open("a", encoding="utf-8") as stream:
+        stream.write(message + "\n")
+    result = {"ok": False, "summary": "", "changed_files": [], "tests": [],
+              "blockers": [message], "violations": [],
+              "artifacts": {"stdout": str(jd / "stdout.jsonl"), "stderr": str(err_path)}}
+    result["needs_human"] = _needs_human("failed", result, [])
+    meta = read_json(jd / "job.json") or {}
+    write_json(jd / "result.json", result)
+    write_json(jd / "exit.json", {"status": "failed", "exit_code": None,
+        "ended_at": time.time(), "elapsed_s": round(time.time() - meta.get("started_at", time.time()), 1)})
 
 
 def _monitor_body(job_id: str) -> int:
@@ -799,45 +812,52 @@ def _monitor_body(job_id: str) -> int:
     # The workbuddy backend takes its prompt on stdin rather than on argv, so a
     # multi-line task body survives (argv truncates it to the first line).
     prompt_on_stdin = meta.get("executor") == "workbuddy"
-    with out_path.open("wb") as out, err_path.open("wb") as err:
-        proc = subprocess.Popen(
-            argv, cwd=meta["cwd"], env=env, stdout=out, stderr=err,
-            stdin=subprocess.PIPE if prompt_on_stdin else subprocess.DEVNULL,
-        )
-        if prompt_on_stdin:
-            try:
-                proc.stdin.write((meta.get("prompt") or "").encode("utf-8"))
-                proc.stdin.close()
-            except (BrokenPipeError, OSError):
-                # The child exited before reading its prompt; the exit code and
-                # stderr below are the real signal, so do not mask them here.
-                pass
-        while proc.poll() is None:
-            if (jd / "cancel.request").exists():
-                proc.kill()
-                status = "cancelled"
-                break
-            if time.time() - started > timeout:
-                proc.kill()
-                status = "timeout"
-                break
-            # A runaway executor printing in a loop would fill the user's disk
-            # while the job still looks healthy. Cap it here, in the loop we
-            # already run, and name the reason so the truncation is never
-            # mistaken for a completed run. The limit is read from the job
-            # record per iteration so it can be overridden per run.
-            try:
-                cap = int(meta.get("log_cap") or LOG_CAP_BYTES)
-                if (out_path.stat().st_size + err_path.stat().st_size) > cap:
+    proc = None
+    writer = None
+    try:
+        with out_path.open("wb") as out, err_path.open("wb") as err:
+            proc = subprocess.Popen(
+                argv, cwd=meta["cwd"], env=env, stdout=out, stderr=err,
+                stdin=subprocess.PIPE if prompt_on_stdin else subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+            )
+            if prompt_on_stdin:
+                def deliver_prompt():
+                    try:
+                        proc.stdin.write((meta.get("prompt") or "").encode("utf-8"))
+                        proc.stdin.close()
+                    except (BrokenPipeError, OSError, ValueError):
+                        pass
+                # A child stuck before reading stdin must not block timeout/cancel.
+                writer = threading.Thread(target=deliver_prompt, daemon=True)
+                writer.start()
+            while proc.poll() is None:
+                if (jd / "cancel.request").exists():
                     proc.kill()
-                    status = "failed"
-                    log_cap_hit = cap
+                    status = "cancelled"
                     break
-            except (OSError, TypeError, ValueError):
-                pass
-            time.sleep(0.5)
-        code = proc.wait()
-    stop.set()
+                if time.time() - started > timeout:
+                    proc.kill()
+                    status = "timeout"
+                    break
+                try:
+                    cap = int(meta.get("log_cap") or LOG_CAP_BYTES)
+                    if out_path.stat().st_size + err_path.stat().st_size > cap:
+                        proc.kill()
+                        log_cap_hit = cap
+                        break
+                except (OSError, TypeError, ValueError):
+                    pass
+                time.sleep(0.5)
+            code = proc.wait()
+    finally:
+        stop.set()
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        if writer is not None:
+            writer.join(timeout=1)
+        t.join(timeout=1)
 
     if log_cap_hit:
         status = "failed"
@@ -865,7 +885,7 @@ def _monitor_body(job_id: str) -> int:
             result["artifacts"]["patch"] = diff["patch"]
             result["artifacts"]["patch_bytes"] = diff["patch_bytes"]
             result["changed_files_git"] = diff["changed"]
-            bad = violations(diff["changed"], meta.get("owned_paths", []))
+            bad = violations(diff["changed"], meta.get("owned_paths", []), diff.get("changes"))
             if bad:
                 status = "done" if status == "done" else status
         except Exception as exc:  # noqa: BLE001
@@ -979,92 +999,87 @@ def _maybe_json(s: str):
 def _assemble(args) -> tuple[list[str], dict, Path]:
     task = load_task(Path(args.task))
     cwd = Path(args.cwd or os.getcwd()).resolve()
-    if not cwd.exists():
-        raise SystemExit(f"工作目录不存在: {cwd}")
-
-    refs = [str(Path(x).resolve()) for x in task["inputs"] if Path(x).exists()]
-    worktree = None
-    run_cwd = cwd
-    jd = None
-
-    job_id = uuid.uuid4().hex[:12]
-    jd = job_dir(job_id)
-
-    # A dry run must not leave anything behind: no job directory, no worktree,
-    # nothing for `jobs` to list later. Resolve the argv-only parts first and
-    # skip every side effect.
-    if getattr(args, "dry_run", False):
-        prompt = build_prompt(task, cwd)
-        backend = getattr(args, "executor", None) or _backend_env()
-        cli = find_cli(backend)
-        schema = json.dumps(RESULT_SCHEMA, ensure_ascii=False, separators=(",", ":"))
-        argv = build_executor_argv(backend, cli, prompt, cwd, schema, refs)
-        blockers = _overlapping_jobs(task["owned_paths"])
-        meta = {"job_id": job_id, "cwd": str(cwd), "worktree": None,
-                "executor": backend, "dry_run": True,
-                "would_block": blockers}
-        return argv, meta, jd
-
-    # Claim the paths before creating a worktree, so a refusal costs nothing.
-    # The claim outlives this call: _monitor releases it when the job ends.
-    _acquire_claim(task["owned_paths"], job_id)
-
-    jd.mkdir(parents=True, exist_ok=True)
-
-    if args.worktree == "auto" and is_git_repo(cwd):
-        worktree = make_worktree(cwd, jd, job_id)
-        if worktree is not None:
-            run_cwd = worktree
-
-    prompt = build_prompt(task, run_cwd)
-    backend = getattr(args, "executor", None) or _backend_env()
+    if not cwd.is_dir():
+        raise ValueError(f"工作目录不存在或不是目录: {cwd}")
+    normalized = []
+    for owned in task["owned_paths"]:
+        candidate = Path(owned.replace("\\", "/"))
+        candidate = (candidate if candidate.is_absolute() else cwd / candidate).resolve()
+        try:
+            relative = candidate.relative_to(cwd).as_posix()
+        except ValueError as exc:
+            raise ValueError(f"owned_paths 超出工作目录: {owned}") from exc
+        if relative == ".":
+            raise ValueError("owned_paths 必须列出具体文件或子目录，不能使用整个仓库根目录")
+        normalized.append(relative)
+    task["owned_paths"] = normalized
+    backend = (getattr(args, "executor", None) or _backend_env()).strip().lower()
+    if backend not in EXECUTOR_BACKENDS:
+        raise CliNotFound(f"未知执行体后端：{backend}")
+    # Probe before claiming any paths, so a missing CLI leaves no live lock.
     cli = find_cli(backend)
     schema = json.dumps(RESULT_SCHEMA, ensure_ascii=False, separators=(",", ":"))
+    job_id = uuid.uuid4().hex[:12]
+    jd = job_dir(job_id)
+    worktree = None
+    run_cwd = cwd
 
-    argv = build_executor_argv(backend, cli, prompt, run_cwd, schema, refs)
+    def references(base):
+        refs = []
+        for value in task["inputs"]:
+            source = Path(value)
+            source = (source if source.is_absolute() else cwd / source).resolve()
+            if not source.exists():
+                raise ValueError(f"输入文件或目录不存在: {source}")
+            try:
+                target = base / source.relative_to(cwd)
+            except ValueError:
+                target = source
+            if not target.exists():
+                raise ValueError(f"隔离工作区缺少输入: {target}；worktree 从 HEAD 创建，请准备可用的基线")
+            refs.append(str(target))
+        return refs
 
-    env = {}
-    if any("app.asar.unpacked" in part for part in cli):
-        workbuddy_home = Path.home() / ".workbuddy"
-        env = {
-            "CODEBUDDY_FORCE_LITE_WB_BUNDLE": "1",
-            "CODEBUDDY_CONFIG_DIR": str(workbuddy_home),
-        }
-        catalog = workbuddy_home / "cache" / "acc-product-config-v3.json"
-        if catalog.is_file():
-            env["ACC_PRODUCT_CONFIG_PATH"] = str(catalog)
+    if getattr(args, "dry_run", False):
+        prompt = build_prompt(task, cwd)
+        argv = build_executor_argv(backend, cli, prompt, cwd, schema, references(cwd))
+        return argv, {"job_id": job_id, "cwd": str(cwd), "worktree": None,
+                      "executor": backend, "model": EXECUTOR_MODEL,
+                      "effort": EXECUTOR_EFFORT, "dry_run": True,
+                      "would_block": _overlapping_jobs(task["owned_paths"])}, jd
 
-    meta = {
-        "schema_version": SCHEMA_VERSION,
-        "job_id": job_id,
-        "task_file": str(Path(args.task).resolve()),
-        "goal": task["goal"],
-        "cwd": str(run_cwd),
-        "repo": str(cwd),
-        "worktree": str(worktree) if worktree else None,
-        "isolated": worktree is not None,
-        "owned_paths": task["owned_paths"],
-        "executor": backend,
-        "model": EXECUTOR_MODEL if backend == "workbuddy" else None,
-        "effort": EXECUTOR_EFFORT if backend == "workbuddy" else None,
-        "model_note": ("固定执行体：WorkBuddy / DeepSeek V4.1 Flash，档位 极致(max)"
-                       if backend == "workbuddy"
-                       else f"后端 {backend}：模型与档位由该 CLI 自己的配置决定"),
-        "argv": argv,
-        # The workbuddy backend delivers the prompt on stdin, not on argv; the
-        # monitor reads it back from here. Kept in the job record so a run can
-        # be reproduced exactly, which argv alone no longer would.
-        "prompt": prompt,
-        # Snapshot the log cap at dispatch time so a run is reproducible and so
-        # the value can be overridden for one run without a global env var.
-        "log_cap": LOG_CAP_BYTES,
-        "env": env,
-        "timeout": int(args.timeout),
-        "created_at": time.time(),
-        "started_at": time.time(),
-    }
-    write_json(jd / "job.json", meta)
-    return argv, meta, jd
+    _acquire_claim(task["owned_paths"], job_id)
+    try:
+        jd.mkdir(parents=True, exist_ok=True)
+        if args.worktree == "auto" and is_git_repo(cwd):
+            worktree = make_worktree(cwd, jd, job_id)
+            if worktree is None:
+                raise RuntimeError("无法创建隔离 worktree，本次任务未启动")
+            run_cwd = worktree
+        prompt = build_prompt(task, run_cwd)
+        argv = build_executor_argv(backend, cli, prompt, run_cwd, schema, references(run_cwd))
+        env = {}
+        if any("app.asar.unpacked" in part for part in cli):
+            workbuddy_home = Path.home() / ".workbuddy"
+            env = {"CODEBUDDY_FORCE_LITE_WB_BUNDLE": "1",
+                   "CODEBUDDY_CONFIG_DIR": str(workbuddy_home)}
+            catalog = workbuddy_home / "cache" / "acc-product-config-v3.json"
+            if catalog.is_file():
+                env["ACC_PRODUCT_CONFIG_PATH"] = str(catalog)
+        meta = {"schema_version": SCHEMA_VERSION, "job_id": job_id,
+                "task_file": str(Path(args.task).resolve()), "goal": task["goal"],
+                "cwd": str(run_cwd), "repo": str(cwd),
+                "worktree": str(worktree) if worktree else None,
+                "isolated": worktree is not None, "owned_paths": task["owned_paths"],
+                "executor": backend, "model": EXECUTOR_MODEL, "effort": EXECUTOR_EFFORT,
+                "model_note": "执行体固定 DeepSeek V4.1 Flash / max；主控继承当前会话",
+                "argv": argv, "prompt": prompt, "log_cap": LOG_CAP_BYTES, "env": env,
+                "timeout": int(args.timeout), "created_at": time.time(), "started_at": time.time()}
+        write_json(jd / "job.json", meta)
+        return argv, meta, jd
+    except BaseException:
+        _release_claim(job_id)
+        raise
 
 
 def cmd_dispatch(args) -> int:
@@ -1095,13 +1110,21 @@ def cmd_dispatch(args) -> int:
     flags = 0
     if os.name == "nt":
         flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
-    subprocess.Popen(
-        monitor_argv, cwd=str(Path(__file__).resolve().parent),
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL, close_fds=True,
-        creationflags=flags,
-        start_new_session=(os.name != "nt"),
-    )
+    try:
+        subprocess.Popen(
+            monitor_argv, cwd=str(Path(__file__).resolve().parent),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL, close_fds=True,
+            creationflags=flags,
+            start_new_session=(os.name != "nt"),
+        )
+    except OSError as exc:
+        _record_failure(meta["job_id"], exc)
+        _release_claim(meta["job_id"])
+        print(json.dumps({"ok": False, "error": "DISPATCH_FAILED", "job_id": meta["job_id"],
+                          "message": str(exc), "job_dir": str(jd)}, ensure_ascii=False))
+        return 1
+
     print(json.dumps({"ok": True, "job_id": meta["job_id"], "status": "running",
                       "job_dir": str(jd), "worktree": meta["worktree"]},
                      ensure_ascii=False))
@@ -1233,38 +1256,33 @@ def cmd_jobs(args) -> int:
 
 
 def cmd_doctor(args) -> int:
-    info: dict = {"ok": True, "schema_version": SCHEMA_VERSION,
-                  "python": sys.version.split()[0],
-                  "state_root": str(STATE_ROOT),
-                  "git": shutil.which("git") or None,
-                  "subagent_env": bool(os.environ.get("WB_SUBAGENT"))}
-    backend = getattr(args, "executor", None) or _backend_env()
-    info["executor"] = backend
-    try:
-        cli = find_cli(backend)
-        info["cli"] = cli
-        info["cli_version"] = cli_version(cli)
-        info["cli_source"] = "WB_CLI" if os.environ.get("WB_CLI") else "auto"
-    except CliNotFound as exc:
-        info["ok"] = False
-        info["cli_error"] = str(exc)
-    cwd = Path(args.cwd or os.getcwd())
-    info["cwd"] = str(cwd)
-    info["is_git_repo"] = is_git_repo(cwd)
-    info["available_executors"] = list(EXECUTOR_BACKENDS)
+    backend = getattr(args, "executor", None) or os.environ.get("WB_EXECUTOR") or DEFAULT_EXECUTOR
+    info = {"ok": True, "schema_version": SCHEMA_VERSION, "python": sys.version.split()[0],
+            "state_root": str(STATE_ROOT), "git": shutil.which("git") or None,
+            "subagent_env": bool(os.environ.get("WB_SUBAGENT")), "executor": backend,
+            "controller": {"model": "current_session", "effort": "current_session"}}
+    # Only the workbuddy backend pins a model and an effort. Reporting a pinned
+    # model for the others would claim a setting this script never injects.
     info["executor_settings"] = (
-        {"model": EXECUTOR_MODEL, "effort": EXECUTOR_EFFORT, "note": "固定，不可切换"}
-        if backend == "workbuddy"
+        {"model": EXECUTOR_MODEL, "effort": EXECUTOR_EFFORT, "note": "固定，不自动降级"}
+        if backend == DEFAULT_EXECUTOR
         else {"note": f"后端 {backend}：参数由该 CLI 决定，不注入 model/effort"}
     )
-    info["defaults"] = {"worktree": "auto", "timeout_s": DEFAULT_TIMEOUT,
-                        "executor": DEFAULT_EXECUTOR}
-    info["notes"] = [
-        "isolated=true 时任务在 .wb-exec/jobs/<id>/wt 的独立 worktree 中执行",
-        "默认执行体 workbuddy 固定为 deepseek-v4.1-flash / 极致(max)：不提供其他模型、不做自动降级",
-        "用 --executor 或 WB_EXECUTOR 切换后端；custom 需同时提供 WB_CLI 与 WB_CLI_ARGV 模板",
-        "从 WorkBuddy 会话内部再调 codebuddy 会与本次会话共用守护进程，可能阻塞；应在外部终端触发",
-    ]
+    try:
+        cli = find_cli(backend)
+        info.update(cli=cli, cli_version=cli_version(cli),
+                    cli_source="WB_CLI" if os.environ.get("WB_CLI") else "auto")
+    except CliNotFound as exc:
+        info.update(ok=False, cli_error=str(exc))
+    cwd = Path(args.cwd or os.getcwd()).resolve()
+    info.update(cwd=str(cwd), is_git_repo=is_git_repo(cwd),
+                available_executors=list(EXECUTOR_BACKENDS),
+                defaults={"worktree": "auto", "timeout_s": DEFAULT_TIMEOUT,
+                          "executor": DEFAULT_EXECUTOR},
+                notes=["主控沿用用户当前会话的模型与思考强度，不读取或修改 Codex 模型配置",
+                       "执行体固定 WorkBuddy / deepseek-v4.1-flash / max，不切换后端或降级",
+                       "doctor 只检查本机 CLI；账号权限与模型可用性以实际执行结果为准",
+                       "不要从 WorkBuddy 会话内部递归派发"])
     print(json.dumps(info, ensure_ascii=False, indent=2))
     return 0 if info["ok"] else 1
 
@@ -1280,7 +1298,7 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--worktree", choices=["auto", "off"], default="auto",
                         help="auto: Git 仓库自动建独立 worktree")
         sp.add_argument("--executor", choices=list(EXECUTOR_BACKENDS), default=None,
-                        help=f"执行体后端，默认 {DEFAULT_EXECUTOR}（也可用 WB_EXECUTOR）")
+                        help="执行体固定为 workbuddy（DeepSeek V4.1 Flash / max）")
 
     d = sub.add_parser("dispatch", help="后台派发，立即返回 job_id")
     task_opts(d)
@@ -1313,7 +1331,7 @@ def build_parser() -> argparse.ArgumentParser:
     doc = sub.add_parser("doctor", help="自检：CLI、git、环境")
     doc.add_argument("--cwd")
     doc.add_argument("--executor", choices=list(EXECUTOR_BACKENDS), default=None,
-                     help=f"检查哪个后端，默认 {DEFAULT_EXECUTOR}（也可用 WB_EXECUTOR）")
+                     help="检查固定的 workbuddy 执行体")
     doc.set_defaults(func=cmd_doctor)
 
     m = sub.add_parser("_monitor", help=argparse.SUPPRESS)
@@ -1325,7 +1343,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     _utf8_stdout()
     args = build_parser().parse_args()
-    return args.func(args)
+    try:
+        return args.func(args)
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(json.dumps({"ok": False, "error": type(exc).__name__,
+                          "message": str(exc)}, ensure_ascii=False))
+        return 1
 
 
 if __name__ == "__main__":

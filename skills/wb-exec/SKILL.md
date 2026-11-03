@@ -30,6 +30,8 @@ python <SKILL_DIR>/scripts/wb_exec.py doctor
 Returns JSON with `ok` / `cli` (the resolved entry point) / `cli_version` / `git` / `is_git_repo` / `state_root`.
 `ok=false` or a non-empty `cli_error` → stop, report the raw output to the user, and do not install or reconfigure anything yourself.
 
+`doctor` proves the CLI is present and answers `--version`. It does **not** prove authentication, quota or model access — a run can still fail after a clean self-check, and that failure belongs in `stderr.log`, not in a guess.
+
 ## 1. Write the task package (this is your most important job)
 
 The task package is JSON; field definitions are in `references/protocol.md` and an example is in `assets/task.example.json`. Three hard rules:
@@ -113,6 +115,8 @@ Review discipline:
 ## 5. Boundaries (violating them causes incidents)
 
 - **Never recurse**: the executor is already forbidden to dispatch, and you must not dispatch a second task over the same files while a worker is running.
+- **Git isolation starts from `HEAD`**: it does not copy the user's uncommitted edits. If the task needs files that are not committed yet, commit or stage them first, because the worktree will not contain them and the run will fail on a missing input.
+- **A failed isolation attempt stops the job**: the script aborts instead of falling back to editing the source tree in place. Never work around that by re-running with `--worktree off` unless in-place execution is what the user actually authorised.
 - **Never trigger `dispatch` from inside a WorkBuddy / CodeBuddy session**: the child process collides with that session's daemon and hangs with zero output — measured at 45–300 seconds with no stdout or stderr at all. Call this script from the host agent or a normal terminal.
 - **Never modify the same file in parallel**: the `owned_paths` of concurrent jobs must not overlap; overlapping work is serialised.
 - **Never return full logs to the user**: give `summary`, the relevant `tests` and `violations`. The logs stay in the `artifacts` paths for on-demand reading.

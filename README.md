@@ -22,7 +22,8 @@ The default executor is **WorkBuddy / CodeBuddy (DeepSeek V4.1 Flash, effort `ma
 
 | Feature | What it does |
 |---|---|
-| **Path whitelist** | `owned_paths` in the task package is the set of paths the executor may touch. Changes outside it are detected and reported in `result.violations` rather than silently accepted |
+| **Path whitelist** | `owned_paths` in the task package is the set of paths the executor may touch. Changes outside it are detected and reported in `result.violations` rather than silently accepted. An empty list is enforced as **additions only**, not as "no check" |
+| **Failures stay collectable** | If dispatch or the supervisor fails, `exit.json` and `result.json` are still written, so the job arrives as `failed` with a blocker instead of vanishing. The CLI is probed before any claim is taken, so a missing executor leaves no live lock |
 | **Directory isolation** | On a Git repository the run happens in a dedicated worktree on a `wb-exec/<id8>` branch: no commit, no push, no auto-merge |
 | **Real diff first** | The executor's `summary` is only its own account. `change.patch` and `changed_files_git` come from the actual `git diff`; when the two disagree, the diff wins |
 | **Structured capture** | A `--json-schema` constraint forces structured output; the script then adds the git diff and the out-of-scope check to produce a machine-readable `result.json` |
@@ -260,11 +261,13 @@ The `custom` template may use `{prompt}`, `{cwd}`, `{schema}`, `{session}`, `{mo
 | `goal` | yes | The objective, without implementation steps; the script renders it into the executor prompt |
 | `context` | no | Background and known constraints |
 | `inputs` | no | Read-only reference material; paths are passed to the executor with `--add-dir` |
-| `owned_paths` | no | **Whitelist of writable paths**; when empty only new files may be created. Always use `/` as the separator |
+| `owned_paths` | no | **Whitelist of writable paths**; when empty only new files may be created, and edits or deletions of existing files are reported. Always use `/` as the separator. Entries are resolved against `--cwd`; one that escapes it, or the repository root itself, is rejected |
 | `acceptance` | no | Executable commands; the executor should run them and record the outcome in `tests` |
 | `notes` | no | Catch-all constraints |
 
-`owned_paths` matching: a path qualifies when it is **exactly equal, or starts with the entry plus `/`**. `src/auth/` covers `src/auth/mw.py`; `src/auth` covers it too. Anything outside the whitelist is recorded in `result.violations`.
+`owned_paths` matching: a path qualifies when it is **exactly equal, or starts with the entry plus `/`**. `src/auth/` covers `src/auth/mw.py`; `src/auth` covers it too. Anything outside the whitelist is recorded in `result.violations`. An empty list is not "no check": additions pass, but a run that modifies or deletes an existing file shows up there, which is what "new files only" has always meant.
+
+The task file is read as `utf-8-sig`, so a package written by Windows PowerShell with a BOM loads instead of failing on a stray character.
 
 Full field definitions and the state machine live in [protocol.md](skills/wb-exec/references/protocol.md); a ready-to-edit template is [task.example.json](skills/wb-exec/assets/task.example.json).
 
@@ -306,6 +309,8 @@ Exit codes:
 
 - **Directory isolation and `owned_paths` are the real security boundary, not optional extras.** On the `workbuddy` backend the child command passes both `-y` and `--permission-mode bypassPermissions`. `-y` alone is documented as "HIGH/CRITICAL still ask", and a non-interactive run has no prompt to answer, so `Write`/`Edit`/`Bash` were refused and every task came back with blockers and an untouched worktree at exit code 0. Isolation plus a whitelist is what actually constrains the run
 - **Never recurse**: the executor is already forbidden to dispatch. The dispatch lock also refuses a second job whose paths overlap a running one, so the old "do not do this" convention is now enforced rather than remembered
+- **Isolation failure aborts the dispatch**: if the worktree cannot be created, nothing runs. There is no silent fallback to editing the source tree in place, because that would quietly turn an isolation guarantee into no isolation
+- **An unusable CLI fails loudly**: the executor is found and probed before any path is claimed, and an explicit `WB_CLI` is authoritative — a broken one fails the run rather than falling back to another installation. A missing CLI therefore leaves no live lock
 - **Never trigger `dispatch` from inside a WorkBuddy / CodeBuddy session**: the child process collides with that session's daemon and hangs silently — measured at 45–300 seconds with no stdout or stderr at all. Call the script from the host agent or a normal terminal
 - **Overlapping work is refused, not queued**: `dispatch` exits `4` with `error: PATHS_LOCKED` and names the holding job. Run `jobs` to see what is holding the paths, then widen the split, wait, or cancel the other job — do not work around it by clearing the lock file
 - **A runaway executor is stopped, not tolerated**: the combined `stdout.jsonl` and `stderr.log` size is checked in the same supervision loop as cancel and timeout. Crossing the cap kills the child and records the cap in `blockers`, so a truncated transcript is never mistaken for a completed run
@@ -382,6 +387,7 @@ Nothing calls a model. `tests/fake_cli.py` replays a stream-json transcript, so 
 - **Unit tests** cover environment injection, a standalone CLI entry taking precedence over the embedded one, a native error result never being reported as success, plain prose never counting as a structured success, and the executor backends — including a test that pins the WorkBuddy argv so a refactor cannot change it silently.
 - **Lock tests** pin both directions: overlapping and nested paths are refused, a path prefix is not treated as a boundary (`src/auth` ≠ `src/authz`), Windows separators normalise, disjoint paths still run. Claim liveness is tested from the side that matters: a job directory with **no heartbeat but a live pid** must still block (that was the crash window where an orphan kept writing), a provably dead pid must be pruned, and an unprobeable pid falls back to the old heuristic so the lock cannot wedge forever. A corrupt lock is asserted to refuse and to be left byte-identical on disk.
 - **`jobs` tests** pin that the listing reports claims and history, that it is strictly read-only (the lock file is byte-identical before and after), that a dead claim is shown but not removed, and that a corrupt lock is reported with exit code 0.
+- **Desktop-regression tests** pin what the Windows installation made easy to get wrong: a UTF-8 BOM package loads, `owned_paths` escaping the working directory is refused, a missing CLI leaves no live claim, an isolation failure never falls back to in-place editing, a spawn failure still produces a collectable terminal result, and a timeout still fires when the executor never reads its stdin
 - **`needs_human` tests** pin the derivation: a clean success needs nobody, while failure, out-of-scope writes, blockers and failing tests each raise it — and passing tests alone do not.
 - **End-to-end tests** drive the real script through `dispatch` → `status` → `collect` against a temporary Git repo: a run produces a patch, the main working tree is left alone, an out-of-scope write is reported in `violations`, `--dry-run` leaves no job directory behind, a dispatched executor cannot dispatch again (exit code 3), and a chatty executor that exceeds the output cap is stopped with the cap named in `blockers` rather than reported as done.
 
@@ -408,6 +414,7 @@ skill-wb-exec/
 │           ├── test_wb_exec.py               # unit tests
 │           ├── test_executor_backends.py     # backend registry, argv pinning
 │           ├── test_end_to_end.py            # dispatch -> status -> collect, against a real repo
+│           ├── test_repair_regressions.py    # Windows-installation regressions: BOM, spawn, isolation
 │           └── test_lock_and_needs_human.py  # lock claims, liveness, jobs listing, needs_human
 ├── docs/
 │   ├── figures/
