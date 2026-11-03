@@ -14,7 +14,7 @@ The default executor is **WorkBuddy / CodeBuddy (DeepSeek V4.1 Flash, effort `ma
 
 ![Figure 1](docs/figures/fig1-architecture.png)
 
-*Figure 1. Install-time registration (top row), run-time delegation to the executor, and the audit path that returns artifacts to the review gate (bottom row, right to left).*
+*Figure 1. Install-time registration (top row), run-time delegation to the executor, and the audit path that returns artifacts to the review gate (bottom row, right to left). The isolation panel also shows what the lock actually guards: claims carry a pid as well as paths, a claim is pruned only when that pid is provably dead, `jobs` inspects the same state without ever pruning it, and a corrupt lock is refused rather than treated as empty.*
 
 ---
 
@@ -27,7 +27,10 @@ The default executor is **WorkBuddy / CodeBuddy (DeepSeek V4.1 Flash, effort `ma
 | **Real diff first** | The executor's `summary` is only its own account. `change.patch` and `changed_files_git` come from the actual `git diff`; when the two disagree, the diff wins |
 | **Structured capture** | A `--json-schema` constraint forces structured output; the script then adds the git diff and the out-of-scope check to produce a machine-readable `result.json` |
 | **Recursion guard** | The child process gets `WB_SUBAGENT=1`; the script refuses to dispatch when it sees that variable (exit code 3), so an executor cannot spawn another executor |
-| **Path-level dispatch lock** | A second dispatch whose `owned_paths` overlap a running job is refused (`PATHS_LOCKED`, exit code 4) instead of racing it. Disjoint paths still run in parallel. Claims from finished or dead jobs are pruned automatically |
+| **Path-level dispatch lock** | A second dispatch whose `owned_paths` overlap a running job is refused (`PATHS_LOCKED`, exit code 4) instead of racing it. Disjoint paths still run in parallel. Whether a claim is still alive is decided by the recorded **pid**, not by a heartbeat age: a supervisor that died before writing its first heartbeat leaves no heartbeat while the executor it spawned may still be editing the claimed paths |
+| **Failed-closed lock** | A `dispatch.lock` that exists but cannot be parsed is refused rather than treated as "no claims". Coercing a damaged lock to empty would admit every job and then rewrite the file with only the new claim, discarding live holds silently |
+| **Bounded output** | `stdout.jsonl` plus `stderr.log` are capped (64 MiB, `WB_EXEC_LOG_CAP` overrides). Crossing the cap kills the child, marks the job `failed` and adds a blocker naming the limit, so a truncated transcript can never be read as a finished run |
+| **`jobs`, read-only** | One command prints the live claims (paths, pid, liveness, age) and the recent job history. It never prunes or releases anything, so a refused user has a way to see what is holding the paths instead of deleting the lock by hand |
 | **`needs_human`, not prose** | Every result carries a structured `needs_human` (`{"required": bool, "reasons": [...]}`) derived from status, `blockers`, failing tests and `violations`. "A person must decide something" is no longer something you infer by reading `summary` |
 | **Non-blocking long runs** | `dispatch` returns a `job_id` immediately; `status` polls, `collect` retrieves, and both heartbeat and timeout are observable |
 | **No dependencies** | Python standard library only, Python 3.10+ |
@@ -171,6 +174,7 @@ The result (excerpt):
 
 ```json
 {
+  "protocol": 1,
   "ok": true,
   "job_id": "3f9c1a7b2e04",
   "status": "done",
@@ -197,6 +201,11 @@ The result (excerpt):
 becomes `true` with a reason list such as `["failed"]`, `["out_of_scope_writes"]`,
 `["blocked"]` or `["failing_tests"]` — never by reading the summary's wording.
 
+`protocol` is the envelope version. It is a plain integer that only changes when
+the shape of this envelope changes, so a host written against an older release
+can tell what it is reading instead of failing deep inside its own logic after
+an upgrade. Unknown keys are safe to ignore; this one is not inferred from text.
+
 **Review discipline — none of these is optional:**
 
 1. **Read the patch yourself before judging.** `artifacts.patch` is the real diff; `summary` is only the executor's account. When they disagree, the diff wins
@@ -216,7 +225,7 @@ becomes `true` with a reason list such as `["failed"]`, `["out_of_scope_writes"]
 | `status` | `--job` | Query the job state |
 | `collect` | `--job` `[--wait]` `[--wait-timeout 1800]` | Collect the result; `--wait` blocks until the job ends |
 | `cancel` | `--job` | Request cancellation (writes a flag file; the supervisor reacts within 0.5 s) |
-| `jobs` | `[--limit 10]` | List recent jobs |
+| `jobs` | `[--limit 20]` | Read-only listing of the live claims (paths, pid, liveness, age) and the recent job history. It prunes and releases nothing |
 
 General notes:
 
@@ -224,6 +233,7 @@ General notes:
 - `--worktree auto` (default) creates a dedicated worktree on a Git repository; `off` runs in place
 - `--executor` selects the backend (`workbuddy` by default; also `codex`, `claude`, `aider`, `custom`). `WB_EXECUTOR` sets the same default through the environment
 - **The `workbuddy` backend is pinned**: DeepSeek V4.1 Flash at effort `max`, hard-coded, with no `--model` or `--effort` flag (passing one is rejected by argparse on purpose). When the account refuses that model the run fails; **do not retry with a different model**, hand `stderr.log` to the user. Other backends use whatever model their own CLI is configured with — `wb-exec` injects no model or effort flag for them
+- **On this backend the prompt travels on stdin, not on argv.** A multi-line argv prompt is truncated to its first line by the CLI, and the task package is always multi-line, so `-p` acts as the read-from-stdin switch. `job.json` therefore stores the prompt itself: `argv` alone no longer reproduces a run
 
 ### Choosing a backend
 
@@ -294,10 +304,11 @@ Exit codes:
 
 *Figure 4. The whitelist and the worktree are enforced in code rather than requested in the prompt, and out-of-scope writes are reported instead of auto-reverted. This is isolation, not confinement: a process that ignores the boundary is not stopped by it.*
 
-- **Directory isolation and `owned_paths` are the real security boundary, not optional extras.** The child command includes `-y`, which skips routine permission prompts (HIGH/CRITICAL cases may still ask), so isolation plus a whitelist is what actually constrains the run
+- **Directory isolation and `owned_paths` are the real security boundary, not optional extras.** On the `workbuddy` backend the child command passes both `-y` and `--permission-mode bypassPermissions`. `-y` alone is documented as "HIGH/CRITICAL still ask", and a non-interactive run has no prompt to answer, so `Write`/`Edit`/`Bash` were refused and every task came back with blockers and an untouched worktree at exit code 0. Isolation plus a whitelist is what actually constrains the run
 - **Never recurse**: the executor is already forbidden to dispatch. The dispatch lock also refuses a second job whose paths overlap a running one, so the old "do not do this" convention is now enforced rather than remembered
 - **Never trigger `dispatch` from inside a WorkBuddy / CodeBuddy session**: the child process collides with that session's daemon and hangs silently — measured at 45–300 seconds with no stdout or stderr at all. Call the script from the host agent or a normal terminal
-- **Overlapping work is refused, not queued**: `dispatch` exits `4` with `error: PATHS_LOCKED` and names the holding job. Widen the split, wait, or cancel the other job — do not work around it by clearing the lock file
+- **Overlapping work is refused, not queued**: `dispatch` exits `4` with `error: PATHS_LOCKED` and names the holding job. Run `jobs` to see what is holding the paths, then widen the split, wait, or cancel the other job — do not work around it by clearing the lock file
+- **A runaway executor is stopped, not tolerated**: the combined `stdout.jsonl` and `stderr.log` size is checked in the same supervision loop as cancel and timeout. Crossing the cap kills the child and records the cap in `blockers`, so a truncated transcript is never mistaken for a completed run
 - **Never dump full logs at the user**: give `summary`, the relevant `tests` and `violations`; the logs stay in the `artifacts` paths for on-demand reading
 - **Never re-run by hand with `-y`**: the script already handles the permission flags; bypassing it bypasses isolation and the out-of-scope check
 - **Never clean up the user's worktree**: after `collect` the directory stays in place for review, and removal is the user's decision
@@ -329,9 +340,10 @@ version:
   dispatch.lock   claims of every running job: job_id, owned_paths, pid, since
   dispatch.guard  transient mutex held only while dispatch.lock is rewritten
   jobs/<job_id>/
-    job.json        task package snapshot, actual argv, cwd, worktree, timeout
+    job.json        task package snapshot, actual argv, cwd, worktree, timeout,
+                    the prompt itself and the log cap in force at dispatch time
     heartbeat.json  updated by the supervisor every 5 seconds
-    stdout.jsonl    raw executor output (stream-json)
+    stdout.jsonl    raw executor output (stream-json), capped with stderr.log
     stderr.log      executor log; model and permission errors usually land here
     change.patch    the real diff (Git repository with isolation enabled)
     result.json     parsed structured result
@@ -343,6 +355,13 @@ version:
 Override the state root with the `WB_EXEC_HOME` environment variable.
 
 `dispatch.lock` is advisory between cooperating jobs and scoped to a single `WB_EXEC_HOME`. It is **not** a security boundary: a process that ignores it is not stopped by it.
+
+Two properties of the lock are worth knowing before you rely on it. A claim is
+considered live while its job has no `exit.json` **and** either has a heartbeat
+or its recorded pid can still be probed as running; liveness is a fact about the
+process, not a guess from a missing file. A lock that cannot be parsed is
+refused, never silently replaced — a safety file that disables itself on
+corruption is worse than one that blocks and tells you where it is.
 
 **Isolation semantics**: `--worktree auto` (default) on a Git repository creates a `wb-exec/<id8>` branch and a `wt/` worktree from the `HEAD` at dispatch time. Nothing is committed, pushed or auto-merged, and the user's uncommitted changes are **not** carried over. Removing the worktree is the user's decision; the script never deletes it.
 
@@ -361,9 +380,10 @@ python skills/wb-exec/tests/test_wb_exec.py
 Nothing calls a model. `tests/fake_cli.py` replays a stream-json transcript, so the suite runs offline.
 
 - **Unit tests** cover environment injection, a standalone CLI entry taking precedence over the embedded one, a native error result never being reported as success, plain prose never counting as a structured success, and the executor backends — including a test that pins the WorkBuddy argv so a refactor cannot change it silently.
-- **Lock tests** pin both directions: overlapping and nested paths are refused, a path prefix is not treated as a boundary (`src/auth` ≠ `src/authz`), Windows separators normalise, disjoint paths still run, and a claim left by a finished or vanished job is pruned rather than wedging the next dispatch.
+- **Lock tests** pin both directions: overlapping and nested paths are refused, a path prefix is not treated as a boundary (`src/auth` ≠ `src/authz`), Windows separators normalise, disjoint paths still run. Claim liveness is tested from the side that matters: a job directory with **no heartbeat but a live pid** must still block (that was the crash window where an orphan kept writing), a provably dead pid must be pruned, and an unprobeable pid falls back to the old heuristic so the lock cannot wedge forever. A corrupt lock is asserted to refuse and to be left byte-identical on disk.
+- **`jobs` tests** pin that the listing reports claims and history, that it is strictly read-only (the lock file is byte-identical before and after), that a dead claim is shown but not removed, and that a corrupt lock is reported with exit code 0.
 - **`needs_human` tests** pin the derivation: a clean success needs nobody, while failure, out-of-scope writes, blockers and failing tests each raise it — and passing tests alone do not.
-- **End-to-end tests** drive the real script through `dispatch` → `status` → `collect` against a temporary Git repo: a run produces a patch, the main working tree is left alone, an out-of-scope write is reported in `violations`, `--dry-run` leaves no job directory behind, and a dispatched executor cannot dispatch again (exit code 3).
+- **End-to-end tests** drive the real script through `dispatch` → `status` → `collect` against a temporary Git repo: a run produces a patch, the main working tree is left alone, an out-of-scope write is reported in `violations`, `--dry-run` leaves no job directory behind, a dispatched executor cannot dispatch again (exit code 3), and a chatty executor that exceeds the output cap is stopped with the cap named in `blockers` rather than reported as done.
 
 ## Project layout
 
@@ -388,9 +408,18 @@ skill-wb-exec/
 │           ├── test_wb_exec.py               # unit tests
 │           ├── test_executor_backends.py     # backend registry, argv pinning
 │           ├── test_end_to_end.py            # dispatch -> status -> collect, against a real repo
-│           └── test_lock_and_needs_human.py  # lock claims, pruning, needs_human derivation
+│           └── test_lock_and_needs_human.py  # lock claims, liveness, jobs listing, needs_human
 ├── docs/
-│   ├── figures/               # figure sources (JSON) and rendered SVG/PDF/PNG
+│   ├── figures/
+│   │   ├── src/               # one JSON spec per figure; the diagram is data, not drawing
+│   │   ├── build.py           # render every spec, then downscale the PNG to 1280 px
+│   │   ├── check_layout.py    # geometric validation: text fits, nothing overlaps, edges land
+│   │   └── fig*.{svg,pdf,png} # rendered artifacts (SVG to edit, PDF to print, PNG to preview)
+│   ├── design/                # the reasoning behind the mechanism, not a sales page
+│   │   ├── protocol.md        #   communication layer: what the contract can and cannot see
+│   │   ├── coordination.md    #   concurrency, path granularity, the stated refusals
+│   │   ├── stability.md       #   crash, hang, cancel, orphans
+│   │   └── rfc.md             #   the three analyses synthesised and ranked
 │   └── launch-drafts.md       # ready-to-post copy per channel, with its own fact-check
 ├── assets/
 │   └── icon.png               # plugin-market storefront icon
@@ -399,9 +428,35 @@ skill-wb-exec/
 └── README.md
 ```
 
+## Design notes
+
+The mechanism is documented layer by layer, including what it refuses to do:
+`docs/design/protocol.md` (host to executor and back), `coordination.md`
+(concurrency and the stated refusals), `stability.md` (crash, hang, cancel,
+orphans) and `rfc.md`, which ranks the findings and records what was rejected
+and why. Several of those notes describe defects that were measured rather than
+guessed at, including two hypotheses that the measurement disproved.
+
 ## Figures
 
-The diagrams are code-native vector files: editable SVG, PDF for print, PNG for preview. Their sources are `docs/figures/src/*.json`, rendered with the `academic-architecture-diagram` skill's layout tool. They describe the implemented mechanism; they are not a benchmark or a proof of anything.
+The diagrams are code-native vector files: editable SVG, PDF for print, PNG for
+preview. Their sources are `docs/figures/src/*.json`; the diagram is data, not a
+drawing, so it can be regenerated and reviewed like code.
+
+```bash
+python docs/figures/check_layout.py    # geometric validation, no rendering
+python docs/figures/build.py           # render every spec, then downscale to 1280 px
+```
+
+`check_layout.py` exists because a diagram can be wrong in ways only an eye
+would normally catch: text spilling out of its box, a node sitting on a panel
+border, an edge ending in mid-air. It measures real font extents and refuses the
+build when any of that happens, so the committed images cannot silently drift
+into that state. `build.py` performs the downscale that used to be a manual step,
+which is why the PNGs here are 1280 px wide rather than the renderer's 2475.
+
+They describe the implemented mechanism; they are not a benchmark or a proof of
+anything.
 
 ## License
 
