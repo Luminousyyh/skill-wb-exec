@@ -224,6 +224,36 @@ def _candidate_entries_for(backend: str) -> list[list[str]]:
     return cands
 
 
+def _add_dir_paths(refs: list[str]) -> list[str]:
+    """Turn task `inputs` into values that are safe to pass to `--add-dir`.
+
+    `--add-dir` is documented as `--add-dir <directories...>`, but `inputs`
+    normally names files (see assets/task.example.json), so handing the raw refs
+    to it put a file where a directory belongs. Each file is widened to its
+    parent directory: that is the narrowest path that still grants access to the
+    file, and two files in one directory collapse into a single entry. Order
+    follows first appearance, so the argv stays deterministic.
+
+    A parent that is itself a filesystem root ("/", "C:\\") is never used: a
+    whole disk would be a far larger grant than the defect being fixed, so such
+    a ref is left as-is instead.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for ref in refs:
+        entry = ref
+        if not Path(ref).is_dir():
+            parent = os.path.dirname(ref)
+            if parent and os.path.dirname(parent) != parent:
+                entry = parent
+        key = os.path.normcase(os.path.normpath(entry))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(entry)
+    return out
+
+
 def build_executor_argv(backend: str, cli: list[str], prompt: str, run_cwd: Path,
                         schema: str, refs: list[str]) -> list[str]:
     """按后端拼装 argv。
@@ -258,7 +288,9 @@ def build_executor_argv(backend: str, cli: list[str], prompt: str, run_cwd: Path
             "--add-dir", str(run_cwd),
             "--session-id", session,
         ]
-        for ref in refs:
+        # `--add-dir` takes directories, so file refs arrive here widened to
+        # their parent directory; see _add_dir_paths().
+        for ref in _add_dir_paths(refs):
             argv.extend(["--add-dir", ref])
         # 执行体固定为 WorkBuddy / DeepSeek V4.1 Flash，推理档位固定 极致(max)。
         # 不提供其他模型或档位，也不做自动降级。
@@ -267,7 +299,7 @@ def build_executor_argv(backend: str, cli: list[str], prompt: str, run_cwd: Path
 
     if backend == "codex":
         argv = cli + ["exec", "--json", "--skip-git-repo-check", "-C", str(run_cwd)]
-        for ref in refs:
+        for ref in _add_dir_paths(refs):
             argv.extend(["--add-dir", ref])
         argv.append(prompt)
         return argv
@@ -280,7 +312,7 @@ def build_executor_argv(backend: str, cli: list[str], prompt: str, run_cwd: Path
             "--permission-mode", "acceptEdits",
             "--add-dir", str(run_cwd),
         ]
-        for ref in refs:
+        for ref in _add_dir_paths(refs):
             argv.extend(["--add-dir", ref])
         return argv
 

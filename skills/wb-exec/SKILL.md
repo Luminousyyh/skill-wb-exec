@@ -1,7 +1,12 @@
 ---
 name: wb-exec
 description: Delegate bounded coding, refactoring and test-writing tasks to a headless CLI executor (WorkBuddy by default, or codex/claude/aider/custom) and collect a structured result plus the real diff. Use when the task can be finished independently, the file set is enumerable, and the host agent only wants to plan and review instead of writing code itself.
-whenToUse: When implementation-shaped subtasks should be outsourced to another CLI agent; when you want a cheaper executor for volume while you (the host) keep planning and review; when changes need an isolated worktree.
+metadata:
+  # Codex reads name/description/metadata; a bare `whenToUse` key was not part of
+  # the frontmatter shape any shipped skill uses, so the same guidance lives in
+  # the key Codex demonstrably defines. The `description` above still carries the
+  # "use when" clause, so nothing is lost for loaders that only read that.
+  short-description: "Outsource bounded implementation to a headless CLI executor: enumerable file sets, cheaper volume work, or changes needing an isolated worktree."
 ---
 
 # wb-exec

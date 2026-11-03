@@ -1,0 +1,4 @@
+interface:
+  display_name: "wb-exec"
+  short_description: "Delegate bounded coding tasks to a headless CLI executor and review the real diff"
+  default_prompt: "Use $wb-exec to hand this bounded implementation task to a headless CLI executor, then read the resulting patch yourself before integrating it."

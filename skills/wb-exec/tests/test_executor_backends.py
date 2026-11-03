@@ -8,6 +8,8 @@ of the other backends so a typo cannot silently ship.
 """
 
 import importlib.util
+import os
+import tempfile
 import unittest
 import uuid
 from pathlib import Path
@@ -23,7 +25,7 @@ class ExecutorBackendTests(unittest.TestCase):
         self.cwd = Path("/repo")
         self.schema = '{"type":"object"}'
         self.prompt = "do the thing"
-        self.refs = ["/a.py"]
+        self.refs = ["/repo/a.py"]
         self._real_uuid4 = uuid.uuid4
         uuid.uuid4 = lambda: uuid.UUID(int=0)
 
@@ -35,6 +37,12 @@ class ExecutorBackendTests(unittest.TestCase):
 
         The prompt is deliberately absent: it now travels on stdin, because a
         multi-line argv prompt is truncated to its first line by this CLI.
+
+        One entry changed on purpose. The ref is a file (/repo/a.py) but the
+        argv says /repo: `--add-dir` is documented as
+        `--add-dir <directories...>`, so a file input is widened to its parent
+        directory before it reaches the CLI. Everything else -- order, flags,
+        spacing -- is still pinned verbatim.
         """
         expected = ["node", "cli"] + [
             "-p",
@@ -45,7 +53,7 @@ class ExecutorBackendTests(unittest.TestCase):
             "--allowedTools", "Read,Write,Edit,Glob,Grep,Bash",
             "--add-dir", str(self.cwd),
             "--session-id", str(uuid.uuid4()),
-            "--add-dir", "/a.py",
+            "--add-dir", "/repo",
             "--model", wb_exec.EXECUTOR_MODEL,
             "--effort", wb_exec.EXECUTOR_EFFORT,
         ]
@@ -144,6 +152,74 @@ class ExecutorBackendTests(unittest.TestCase):
         info = _json.loads(buf.getvalue())
         self.assertEqual("codex", info["executor"])
         self.assertNotIn("model", info["executor_settings"])
+
+
+class AddDirPathTests(unittest.TestCase):
+    """`--add-dir` is documented as `--add-dir <directories...>`.
+
+    Task `inputs` name files (assets/task.example.json), so the raw refs were
+    handed to a flag that only accepts directories. These tests pin the fix:
+    widen to the parent, once per directory, and never to a root.
+    """
+
+    def _values(self, argv, flag):
+        return [argv[i + 1] for i, part in enumerate(argv) if part == flag]
+
+    def test_a_file_is_widened_to_its_parent_directory(self):
+        self.assertEqual(["/repo/src"], wb_exec._add_dir_paths(["/repo/src/a.py"]))
+
+    def test_two_files_in_one_directory_produce_one_entry(self):
+        self.assertEqual(
+            ["/repo/src"],
+            wb_exec._add_dir_paths(["/repo/src/a.py", "/repo/src/b.py"]),
+        )
+
+    def test_order_follows_first_appearance(self):
+        self.assertEqual(
+            ["/repo/b", "/repo/a"],
+            wb_exec._add_dir_paths(["/repo/b/x.py", "/repo/a/y.py", "/repo/b/z.py"]),
+        )
+
+    def test_a_directory_ref_is_passed_through_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual([tmp], wb_exec._add_dir_paths([tmp]))
+
+    def test_a_root_is_never_used_as_a_widening(self):
+        """Widening /a.py to / would hand the executor the whole filesystem."""
+        self.assertEqual(["/a.py"], wb_exec._add_dir_paths(["/a.py"]))
+
+    @unittest.skipIf(os.name != "nt", "drive roots only exist under ntpath")
+    def test_a_drive_root_is_never_used_as_a_widening(self):
+        self.assertEqual(["C:\\a.py"], wb_exec._add_dir_paths(["C:\\a.py"]))
+
+    def test_every_add_dir_value_is_a_directory_for_the_workbuddy_backend(self):
+        refs = ["/repo/src/a.py", "/repo/src/b.py", "/repo/tests/test_auth.py"]
+        argv = wb_exec.build_executor_argv(
+            "workbuddy", ["node", "cli"], "p", Path("/repo"), "{}", refs
+        )
+        self.assertEqual([str(Path("/repo")), "/repo/src", "/repo/tests"],
+                         self._values(argv, "--add-dir"))
+
+    def test_claude_and_codex_only_receive_directories(self):
+        # claude passes the working directory via --add-dir as well; codex
+        # passes it via -C, so only the widened ref shows up there.
+        expected = {
+            "claude": [str(Path("/repo")), "/repo/src"],
+            "codex": ["/repo/src"],
+        }
+        for backend, want in expected.items():
+            with self.subTest(backend=backend):
+                argv = wb_exec.build_executor_argv(
+                    backend, [backend], "p", Path("/repo"), "{}", ["/repo/src/a.py"]
+                )
+                self.assertEqual(want, self._values(argv, "--add-dir"))
+
+    def test_aider_still_reads_the_named_files(self):
+        """aider's `--read` takes files, so its refs must not be widened."""
+        argv = wb_exec.build_executor_argv(
+            "aider", ["aider"], "p", Path("/repo"), "{}", ["/repo/src/a.py"]
+        )
+        self.assertEqual(["/repo/src/a.py"], self._values(argv, "--read"))
 
 
 if __name__ == "__main__":
