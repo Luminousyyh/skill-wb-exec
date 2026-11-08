@@ -30,7 +30,7 @@
 
 ![图 1　整体结构](figures/fig1-architecture.png)
 
-*图 1　整体结构。上排是安装链路：`package.json` 声明 `dsh.bundle`，装载器据此把 `entry + skill files` 挂到宿主的技能表上。右上是运行链路：`dispatch` **先领走 `dispatch.lock` 里的路径（claim first），再**派生一个 CLI 执行体；执行体只在 `worktree wt/` 里改文件，并受 `owned_paths` 白名单约束。下排自右向左是审计链路：心跳、真实 git diff、越界清单、以及 `needs_human`，一并回流到审查门，由人决定合入还是重新拆一个更小的任务包。*
+*图 1　整体结构，按列自左向右阅读。第一列是安装链路：`package.json` 声明 `dsh.bundle`，装载器据此把 entry 与 skill 文件挂到宿主的技能表上。第二列是执行链路：`dispatch` **先占用路径，再**派生 CLI 执行体；执行体只在 `worktree wt/` 里改文件，并受 `owned_paths` 白名单约束。第三列是审计链路：心跳、真实 `git diff`、越界清单（`violations`）以及 `needs_human`，一并回流到审查门，由人决定打补丁还是重新拆一个更小的任务包。脚注重申隔离边界，并记下一句：锁损坏就拒绝，而不是当作空的。*
 
 ```
 宿主 Agent（规划 + 审查）
@@ -62,7 +62,7 @@ wb-exec collect
 
 ![图 2　一次委派的生命周期](figures/fig2-workflow.png)
 
-*图 2　一次委派的生命周期。从写任务包到 review，是一个单向流程；右下那条虚线是唯一的回路——审查不通过时不是"让同一个 Agent 再试一次"，而是重新拆一个更小的任务包。左下角两条是这套设计的地基：`acceptance` 必须是可执行命令而不是散文；argv、心跳、流式输出和 diff 全部落盘，所以事后可复核。*
+*图 2　一次委派的生命周期，画成一条单向通路：写任务包、占用路径、派生 CLI、改 worktree、`git diff`，可观测产物（依赖集合、心跳随时间的变化、变更文件集合、`violations`）随各阶段一并产出。这张图**有意不画回路**——审查不通过时不是"让同一个 Agent 再试一次"，而是重新拆一个更小的任务包，那就是图 1 里那条 `re-split task` 边。两条前置条件没有画进图里，但对每个任务包都成立：`acceptance` 必须是可执行命令而不是散文；argv、心跳、流式输出和 diff 全部落盘，所以事后可复核。*
 
 每个约束都能落到具体代码上，不是设计意图，是现在的行为。
 
@@ -108,7 +108,7 @@ proc = git(["worktree", "add", "-b", branch, str(wt), "HEAD"], repo)
 
 ![图 3　隔离与越界检查](figures/fig4-isolation.png)
 
-*图 3　隔离与越界检查。左边：worktree 从**派发时刻的 HEAD** 建出，所以未提交改动不会跟着进去——"from HEAD only, no user changes" 这一句是整个隔离性质的前提。右边：每个被改动的路径都要过白名单这一关，界内的进 `changed_files_git`，界外的进 `violations`；界外的处理是**报告**，不是自动回滚（"reported, never auto-reverted"）。最下面一行是三条硬约束：不 commit、不 push、不自动合入。*
+*图 3　隔离与越界检查。左边：worktree 从**派发时刻的 HEAD** 建出，所以未提交改动不会跟着进去。右边：每个被改动的路径都要过白名单这一关，界内的进 `changed_files_git`，界外的进 `violations`；界外的处理是**报告**，不是自动回滚（"reported, never auto-reverted"）。脚注给出三条硬约束：不 commit、不 push、不自动合入。*
 
 *注意这张图画的是**白名单非空**的情形。`owned_paths` 为空时 `violations()` 会在第一行直接返回 `[]`，这一关根本不执行——这正是缺陷 1。*
 
@@ -184,7 +184,7 @@ return {"required": bool(reasons), "reasons": reasons}
 
 ![图 4　状态机](figures/fig3-states.png)
 
-*图 4　状态机。`running` 是唯一"在跑"的状态，四个终态各有明确判据：拿到结构化结果 → `done`；进程退出但没有结果 → `failed`；挂钟超时 → `timeout`；取消被看到 → `cancelled`。左上角 `stalled (derived)` 是**推导**出来的，不落盘也不上报——它只是"90 秒没心跳"的一个视图，而不是第五种状态。*
+*图 4　状态分类（不是一张扇出的状态转移图）。中间一列是对任务做分类的判定序列——启动、写心跳、判陈旧、探 `exit.json`、最终分类——每个判定步骤向右指向它选定的持久化状态：`running`、`done`、`failed`、`timeout`、`cancelled`。分支并列写在序列旁边而不是画成从 `running` 扇出，因为底层版式是一条流水线。脚注给出四个终态的判据（拿到结构化结果 → `done`；进程退出但没有结果 → `failed`；挂钟超时 → `timeout`；取消被看到 → `cancelled`），并记下 `stalled` 是读取时按心跳年龄**推导**出来的，从不落盘，也不是第五种状态。*
 
 | 项 | 值 | 说明 |
 |---|---|---|

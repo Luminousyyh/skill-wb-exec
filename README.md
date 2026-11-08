@@ -14,7 +14,7 @@ The default executor is **WorkBuddy / CodeBuddy (DeepSeek V4.1 Flash, effort `ma
 
 ![Figure 1](docs/figures/fig1-architecture.png)
 
-*Figure 1. Install-time registration (top row), run-time delegation to the executor, and the audit path that returns artifacts to the review gate (bottom row, right to left). The isolation panel also shows what the lock actually guards: claims carry a pid as well as paths, a claim is pruned only when that pid is provably dead, `jobs` inspects the same state without ever pruning it, and a corrupt lock is refused rather than treated as empty.*
+*Figure 1. Install-time registration, run-time delegation to the executor, and the audit path that returns artifacts to the review gate — drawn as three columns, read left to right: installation, execution, audit. The execution column shows the ordering that matters: `dispatch` claims the paths from the lock *before* it spawns the CLI executor, and the executor edits only the worktree `wt/`, bounded by the `owned_paths` whitelist. The footnote restates that bound and records that a corrupt lock is refused rather than treated as empty.*
 
 ---
 
@@ -42,7 +42,7 @@ The default executor is **WorkBuddy / CodeBuddy (DeepSeek V4.1 Flash, effort `ma
 
 ![Figure 2](docs/figures/fig2-workflow.png)
 
-*Figure 2. One delegation cycle. The host never merges on its own: review is a separate, mandatory step, and a failed attempt goes back as a smaller task package.*
+*Figure 2. One delegation, drawn as a single unidirectional pass: task authoring, path claim, CLI spawn, worktree edit and `git diff`, with the observable outputs collected alongside. No cycle is drawn on purpose — a failed review does not re-run the same executor, it re-splits into a smaller package, which is the `re-split task` edge in Figure 1. The host never merges on its own: review is a separate, mandatory step.*
 
 1. The host writes the task package to disk as JSON (`goal`, `owned_paths`, `acceptance`, ...)
 2. `dispatch` (background) or `run` (foreground) starts the call; Git repositories get a dedicated worktree by default
@@ -277,7 +277,7 @@ Full field definitions and the state machine live in [protocol.md](skills/wb-exe
 
 ![Figure 3](docs/figures/fig3-states.png)
 
-*Figure 3. Job states. `stalled` is derived from a missing exit file, not reported by the executor.*
+*Figure 3. State classification. The decision sequence — spawn, heartbeat write, staleness check, `exit.json` probe, classify — points at the persisted state it selects; branches are listed beside the sequence rather than drawn as a fan-out. The footnote gives the criteria for the four terminal states and records that `stalled` is derived at read time from heartbeat age, never stored as a sixth state, and is not reported by the executor.*
 
 State machine: `running` → `done` | `failed` | `timeout` | `cancelled` | `stalled`
 
@@ -305,7 +305,7 @@ Exit codes:
 
 ![Figure 4](docs/figures/fig4-isolation.png)
 
-*Figure 4. The whitelist and the worktree are enforced in code rather than requested in the prompt, and out-of-scope writes are reported instead of auto-reverted. This is isolation, not confinement: a process that ignores the boundary is not stopped by it.*
+*Figure 4. The whitelist and the worktree are enforced in code rather than requested in the prompt. Left: the worktree is cut from `HEAD` at dispatch, so uncommitted changes do not carry over. Right: every changed path is classified — in-scope paths land in `changed_files_git`, out-of-scope paths in `violations`, and they are reported rather than auto-reverted. The footnote states the three hard constraints: no commit, no push, no auto-merge. This is isolation, not confinement: a process that ignores the boundary is not stopped by it.*
 
 - **Directory isolation and `owned_paths` are the real security boundary, not optional extras.** On the `workbuddy` backend the child command passes both `-y` and `--permission-mode bypassPermissions`. `-y` alone is documented as "HIGH/CRITICAL still ask", and a non-interactive run has no prompt to answer, so `Write`/`Edit`/`Bash` were refused and every task came back with blockers and an untouched worktree at exit code 0. Isolation plus a whitelist is what actually constrains the run
 - **Never recurse**: the executor is already forbidden to dispatch. The dispatch lock also refuses a second job whose paths overlap a running one, so the old "do not do this" convention is now enforced rather than remembered
@@ -418,10 +418,8 @@ skill-wb-exec/
 │           └── test_lock_and_needs_human.py  # lock claims, liveness, jobs listing, needs_human
 ├── docs/
 │   ├── figures/
-│   │   ├── src/               # one JSON spec per figure; the diagram is data, not drawing
-│   │   ├── build.py           # render every spec, then downscale the PNG to 1280 px
-│   │   ├── check_layout.py    # geometric validation: text fits, nothing overlaps, edges land
-│   │   └── fig*.{svg,pdf,png} # rendered artifacts (SVG to edit, PDF to print, PNG to preview)
+│   │   ├── pixel_gate.py      # geometric validation: blank-band and ink of the committed PNGs
+│   │   └── fig*.{svg,pdf,png} # SVG is the source; PDF to print, PNG (1248 px) to preview
 │   ├── design/                # the reasoning behind the mechanism, not a sales page
 │   │   ├── protocol.md        #   communication layer: what the contract can and cannot see
 │   │   ├── coordination.md    #   concurrency, path granularity, the stated refusals
@@ -447,20 +445,21 @@ guessed at, including two hypotheses that the measurement disproved.
 ## Figures
 
 The diagrams are code-native vector files: editable SVG, PDF for print, PNG for
-preview. Their sources are `docs/figures/src/*.json`; the diagram is data, not a
-drawing, so it can be regenerated and reviewed like code.
+preview. The SVG is the source of truth: each figure is edited directly and
+re-rendered to PDF and to a 1248 px PNG with the architecture renderer.
 
 ```bash
-python docs/figures/check_layout.py    # geometric validation, no rendering
-python docs/figures/build.py           # render every spec, then downscale to 1280 px
+python docs/figures/pixel_gate.py      # blank-band and ink check, no rendering
 ```
 
-`check_layout.py` exists because a diagram can be wrong in ways only an eye
-would normally catch: text spilling out of its box, a node sitting on a panel
-border, an edge ending in mid-air. It measures real font extents and refuses the
-build when any of that happens, so the committed images cannot silently drift
-into that state. `build.py` performs the downscale that used to be a manual step,
-which is why the PNGs here are 1280 px wide rather than the renderer's 2475.
+`pixel_gate.py` exists because a diagram can be wrong in ways only an eye would
+normally catch. The defect that motivated it was a two-panel figure whose panels
+were meant to be stacked but never moved: the canvas height had doubled, every
+label stayed inside the canvas and the renderer reported zero errors, while 59%
+of the image was empty and the panels were still side by side. The check
+therefore measures the bounding box of the non-white pixels and refuses a figure
+whose blank margin exceeds 35% on any side, or whose content covers less than 55%
+of either axis.
 
 They describe the implemented mechanism; they are not a benchmark or a proof of
 anything.
